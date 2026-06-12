@@ -1,0 +1,2958 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>ZOMBIE HUNTER — Survive the Night</title>
+<!-- Creepster: title screen only. Black Ops One: the in-game HUD. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Creepster&family=Black+Ops+One&display=swap" rel="stylesheet">
+
+<!-- boot gate: devices that can't run the 3D build (no import maps = iOS < 16.4,
+     or no WebGL) go straight to the frozen 2D game; a CDN/module failure flips
+     a visible escape hatch after 8s instead of leaving a black screen -->
+<script>
+(function () {
+  var im = window.HTMLScriptElement && HTMLScriptElement.supports
+        && HTMLScriptElement.supports('importmap');
+  var gl = false;
+  try { var c = document.createElement('canvas');
+        gl = !!(c.getContext('webgl2') || c.getContext('webgl')); } catch (e) {}
+  if (!im || !gl) { location.replace('classic.html'); return; }
+  window.__bootWatch = setTimeout(function () {
+    if (!window.__threeBooted) {
+      var el = document.getElementById('bootFail');
+      if (el) el.style.display = 'flex';
+    }
+  }, 8000);
+})();
+</script>
+
+<!-- three.js, pinned — core and addons MUST share one version -->
+<script type="importmap">
+{ "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.184.0/build/three.module.min.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.184.0/examples/jsm/"
+} }
+</script>
+<style>
+  /* ---------- layout: everything is fixed full-screen layers ---------- */
+  * { margin:0; padding:0; box-sizing:border-box;
+      -webkit-user-select:none; user-select:none; -webkit-tap-highlight-color:transparent; }
+  html, body { height:100%; width:100%; position:fixed; overflow:hidden;
+      font-family:-apple-system, "Segoe UI", Roboto, sans-serif; }
+  /* locked palette: near-black greens, toxic glow, ember orange. nothing else. */
+  :root { --toxic:#8aff5a; --toxic-dim:#39e02a; --bone:#cfe0c4; --ember:#ff9a3c;
+          --night:#04130a; --hud:'Black Ops One', 'Arial Narrow', sans-serif;
+          --panelbg:rgba(4,14,8,.82); --paneledge:rgba(122,255,86,.28); }
+  body { background:#020705; }
+  @keyframes bgshift { 0%{background-position:0% 0%} 50%{background-position:100% 100%} 100%{background-position:0% 0%} }
+
+  /* mirrored selfie camera behind the game canvas (hidden until camera starts) */
+  /* the camera now tracks from a small corner self-view (tap it to tuck it
+     away — it shrinks to 2px but NEVER display:none, MediaPipe needs frames) */
+  #cam { position:fixed; right:12px; bottom:calc(env(safe-area-inset-bottom, 0px) + 64px);
+         width:min(26vw, 170px); height:auto; aspect-ratio:4/3; object-fit:cover;
+         transform:scaleX(-1); display:none; filter:brightness(.75) saturate(.65);
+         border-radius:4px; border:1px solid var(--paneledge);
+         box-shadow:0 6px 18px rgba(0,0,0,.6); z-index:15; cursor:pointer; }
+  #cam.self-hidden { width:2px; height:2px; opacity:0; pointer-events:auto; border:none; }
+  #selfHint { position:fixed; right:14px; bottom:calc(env(safe-area-inset-bottom, 0px) + 40px);
+         font-family:var(--hud); font-size:10px; letter-spacing:1px; color:#6f9; opacity:.6;
+         z-index:15; pointer-events:none; display:none; }
+  #game { position:fixed; inset:0; touch-action:none; cursor:crosshair; }
+
+  /* ---------- live video call layers ---------- */
+  /* role classes: a video is either the fullscreen backdrop (.vid-bg) or the
+     small corner picture-in-picture (.vid-pip); JS swaps the roles */
+  #remoteVid { display:none; background:#000; }
+  #remoteVid.vid-bg { position:fixed; inset:0; width:100%; height:100%;
+      object-fit:cover; border:none; border-radius:0; z-index:0; }
+  #cam.vid-pip, #remoteVid.vid-pip { position:fixed; inset:auto; width:min(30vw, 200px);
+      height:auto; aspect-ratio:4/3; object-fit:cover; border-radius:16px;
+      border:2px solid rgba(255,255,255,.75); box-shadow:0 8px 24px rgba(0,0,0,.45);
+      z-index:16; background:#000; cursor:pointer; }
+  #cam.vid-pip { transform:scaleX(-1); } /* selfie stays mirrored even when small */
+  #pipTag { position:fixed; z-index:17; width:min(30vw, 200px); aspect-ratio:4/3;
+      pointer-events:none; display:none; }
+  #pipName { position:absolute; left:50%; bottom:6px; transform:translateX(-50%);
+      background:rgba(0,0,0,.55); color:#fff; font-size:13px; font-weight:700;
+      padding:2px 10px; border-radius:999px; max-width:92%; white-space:nowrap; overflow:hidden; }
+  #muteBtn { position:absolute; top:-12px; right:-12px; width:44px; height:44px;
+      border-radius:50%; border:none; font-size:20px; background:rgba(0,0,0,.65);
+      color:#fff; pointer-events:auto; }
+  #muteBtn.muted { background:#c0392b; }
+  /* which corner the PiP lives in (drag to move, default bottom-right) */
+  body[data-pip="br"] #cam.vid-pip, body[data-pip="br"] #remoteVid.vid-pip, body[data-pip="br"] #pipTag
+    { right:12px; bottom:calc(env(safe-area-inset-bottom, 0px) + 76px); }
+  body[data-pip="bl"] #cam.vid-pip, body[data-pip="bl"] #remoteVid.vid-pip, body[data-pip="bl"] #pipTag
+    { left:12px; bottom:calc(env(safe-area-inset-bottom, 0px) + 76px); }
+  body[data-pip="tr"] #cam.vid-pip, body[data-pip="tr"] #remoteVid.vid-pip, body[data-pip="tr"] #pipTag
+    { right:12px; top:calc(env(safe-area-inset-top, 0px) + 70px); }
+  body[data-pip="tl"] #cam.vid-pip, body[data-pip="tl"] #remoteVid.vid-pip, body[data-pip="tl"] #pipTag
+    { left:12px; top:calc(env(safe-area-inset-top, 0px) + 70px); }
+  #sendBadge { position:fixed; top:calc(env(safe-area-inset-top, 0px) + 68px); right:12px;
+      z-index:11; background:rgba(0,0,0,.5); color:#fff; font-size:13px; font-weight:700;
+      padding:5px 12px; border-radius:999px; display:none; }
+  #sendBadge .dot { display:inline-block; width:9px; height:9px; border-radius:50%;
+      background:#ff5050; margin-right:6px; animation:pulse 1.6s ease infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+
+  /* ---------- HUD ---------- */
+  /* HUD: monochrome green stencil on dark glass — minimal, gritty, no emoji */
+  #score { position:fixed; top:calc(env(safe-area-inset-top, 0px) + 6px); left:0; right:0;
+      text-align:center; font-size:min(11vw, 72px); font-weight:400;
+      font-family:var(--hud); color:#9fe879; letter-spacing:2px;
+      text-shadow:0 0 14px rgba(122,255,86,.5), 0 3px 10px rgba(0,0,0,.9);
+      pointer-events:none; transition:transform .12s ease-out; z-index:10; }
+  #score.bump { transform:scale(1.18); }
+  #banner { position:fixed; top:34%; left:0; right:0; text-align:center;
+      font-size:min(11vw, 76px); font-weight:400; font-family:var(--hud);
+      color:var(--toxic); letter-spacing:3px; text-transform:uppercase;
+      text-shadow:0 0 22px rgba(122,255,86,.5), 0 5px 16px rgba(0,0,0,.85);
+      pointer-events:none; z-index:11;
+      opacity:0; transform:scale(.5); transition:opacity .25s, transform .35s cubic-bezier(.2,1.6,.4,1); }
+  #banner.show { opacity:1; transform:scale(1); }
+  /* combo callout (x2 x3) under the score, never fighting the banner */
+  #combo { position:fixed; top:calc(env(safe-area-inset-top, 0px) + 14px + min(11vw, 72px));
+      left:0; right:0; text-align:center; font-family:var(--hud);
+      font-size:min(7vw, 40px); color:var(--ember); letter-spacing:2px;
+      text-shadow:0 0 14px rgba(255,154,60,.55), 0 3px 10px rgba(0,0,0,.9);
+      pointer-events:none; z-index:10; opacity:0; transform:scale(.5);
+      transition:opacity .15s, transform .25s cubic-bezier(.2,1.8,.4,1); }
+  #combo.show { opacity:1; transform:scale(1); }
+  #chip { position:fixed; bottom:calc(env(safe-area-inset-bottom, 0px) + 64px); left:50%;
+      transform:translateX(-50%); background:var(--panelbg); color:#cfe0c4; padding:8px 16px;
+      border:1px solid var(--paneledge); border-radius:4px; font-size:13px;
+      font-family:var(--hud); letter-spacing:1px; max-width:92vw; text-align:center;
+      pointer-events:none; opacity:0; transition:opacity .4s; z-index:12; }
+
+  /* live hand-tracking status pill: green = hand seen, yellow = looking, gray = touch */
+  #pill { position:fixed; bottom:calc(env(safe-area-inset-bottom, 0px) + 12px); left:12px;
+      padding:7px 14px; border-radius:4px; font-size:13px; letter-spacing:2px;
+      font-family:var(--hud); color:#dfeede; z-index:12; pointer-events:none;
+      transition:background .3s; border:1px solid rgba(0,0,0,.4); }
+  #pill.p-green { background:rgba(18,92,44,.88); border-color:rgba(122,255,86,.4); }
+  #pill.p-yellow { background:rgba(140,104,8,.9); border-color:rgba(255,210,80,.4); }
+  #pill.p-gray { background:rgba(40,48,42,.88); border-color:rgba(160,180,160,.25); }
+  #hint { position:fixed; top:20%; left:50%; transform:translateX(-50%); max-width:88vw;
+      background:var(--panelbg); color:#ffd24f; font-size:min(4.5vw, 20px);
+      font-family:var(--hud); letter-spacing:1px; border:1px solid var(--paneledge);
+      padding:12px 20px; border-radius:6px; text-align:center; z-index:12;
+      pointer-events:none; opacity:0; transition:opacity .4s; }
+  #hint.show { opacity:1; }
+
+  /* ---------- buttons & panels ---------- */
+  button { font-family:var(--hud); cursor:pointer; letter-spacing:1px; }
+  #gear { position:fixed; top:calc(env(safe-area-inset-top, 0px) + 10px); right:12px;
+      padding:9px 14px; font-size:13px; letter-spacing:2px; border:1px solid var(--paneledge);
+      border-radius:4px; background:var(--panelbg); color:#9fe879; z-index:20; display:none; }
+  .hidden { display:none !important; }
+  #panel { position:fixed; top:50%; left:50%; transform:translate(-50%,-50%);
+      background:var(--panelbg); color:#cfe0c4; border-radius:8px; padding:22px 26px;
+      width:min(92vw, 420px); z-index:30; box-shadow:0 12px 40px rgba(0,0,0,.7),
+      0 0 0 1px var(--paneledge); font-family:var(--hud); }
+  #panel h3 { margin-bottom:14px; font-size:17px; letter-spacing:2px; color:#9fe879; }
+  #panel label { display:flex; align-items:center; gap:10px; font-size:18px; margin:10px 0 18px; }
+  #audState { font-size:11px; opacity:.7; margin:-8px 0 12px; min-height:16px; letter-spacing:1px; }
+  #panel input[type=range] { flex:1; height:40px; accent-color:#39e02a; }
+  #closePanel { display:block; width:100%; padding:13px; font-size:16px;
+      border:1px solid var(--paneledge); border-radius:4px;
+      background:rgba(18,92,44,.6); color:#cfe8c8; }
+  #roomSec { border-top:1px solid var(--paneledge); margin:16px 0; padding-top:12px; }
+  #roomSec input { display:block; width:100%; margin:8px 0; padding:11px; font-size:16px;
+      border:1px solid var(--paneledge); border-radius:4px;
+      background:rgba(8,24,14,.85); color:#cfe8c8; font-family:var(--hud); letter-spacing:1px; }
+  #codeRow { display:flex; align-items:center; gap:8px; margin:4px 0 2px; }
+  #genCode { flex:1; font-size:clamp(14px, 4vw, 19px); letter-spacing:1px;
+      background:rgba(8,24,14,.7); border:1px dashed var(--paneledge); color:#9fe879;
+      padding:10px 12px; border-radius:4px; text-align:center; font-family:var(--hud); }
+  #newCode { width:46px; height:46px; font-size:20px; border:1px solid var(--paneledge);
+      border-radius:4px; background:rgba(8,24,14,.7); color:#9fe879; }
+  #roomSec .tiny2 { font-size:11px; opacity:.65; margin:2px 0 8px; letter-spacing:.5px; }
+  #joinBtn { width:100%; padding:12px; font-size:15px; border:1px solid var(--paneledge);
+      border-radius:4px; background:rgba(18,92,44,.55); color:#cfe8c8; margin:6px 0 4px; }
+  #roomStatus { font-size:12px; opacity:.85; min-height:16px; margin-bottom:8px; letter-spacing:1px; }
+  #board { position:fixed; top:calc(env(safe-area-inset-top, 0px) + 10px); left:12px;
+      z-index:10; pointer-events:none; display:flex; flex-direction:column; gap:6px; }
+  #board .prow { background:var(--panelbg); color:#cfe0c4; padding:5px 12px; font-size:14px;
+      border-radius:4px; border:1px solid rgba(122,255,86,.15); font-family:var(--hud);
+      letter-spacing:1px; }
+  #board .prow.me { border-color:rgba(122,255,86,.45); color:#9fe879; }
+
+  /* ---------- versus mode ---------- */
+  #vsBtn { width:100%; padding:12px; font-size:15px; border:1px solid var(--paneledge);
+      border-radius:4px; background:rgba(60,28,8,.6); color:#ffb066; margin:2px 0 8px; }
+  #vov { position:fixed; inset:0; display:flex; flex-direction:column; align-items:center;
+      justify-content:center; gap:10px; z-index:15; pointer-events:none; text-align:center;
+      background:rgba(10,5,40,.35); padding:20px; }
+  #vov .v1 { font-size:min(6.5vw, 38px); font-family:var(--hud); color:#dfeede;
+      letter-spacing:2px; text-transform:uppercase; text-shadow:0 4px 14px rgba(0,0,0,.8); }
+  #vov .v2 { font-size:min(26vw, 170px); font-weight:400; font-family:var(--hud);
+      color:var(--toxic); line-height:1.05;
+      text-shadow:0 0 26px rgba(122,255,86,.45), 0 8px 24px rgba(0,0,0,.75); }
+  #vov .v3 { font-size:min(4vw, 17px); color:#cfe0c4; opacity:.85; font-family:var(--hud);
+      letter-spacing:1px; }
+  #tbar { position:fixed; top:0; left:0; height:12px; width:100%; display:none; z-index:14;
+      background:linear-gradient(90deg,#2faa1f,#a6ff4f); border-radius:0 8px 8px 0;
+      box-shadow:0 0 14px rgba(122,255,86,.55); }
+
+  /* ---------- start screen: the poster IS the backdrop ----------
+     darkening wash over the poster art over a plain dark gradient (the
+     game must never depend on the art). Creepster lives here, and only here. */
+  #start { position:fixed; inset:0; z-index:40; display:flex; flex-direction:column;
+      align-items:center; justify-content:center; gap:16px; text-align:center; padding:24px;
+      background:linear-gradient(rgba(3,10,5,.45), rgba(2,6,3,.78)),
+                 url('poster.png') center/cover no-repeat,
+                 linear-gradient(170deg,#0a1f10,#04130a 60%,#020806); }
+  #start h1 { font-family:'Creepster', cursive; font-weight:400; color:var(--toxic);
+      font-size:min(17vw, 96px); letter-spacing:3px; line-height:1;
+      text-shadow:0 0 30px rgba(122,255,86,.6), 0 0 70px rgba(122,255,86,.35),
+                  0 6px 18px rgba(0,0,0,.9);
+      animation:flicker 5s ease-in-out infinite; }
+  @keyframes flicker { 0%,100%{opacity:1} 88%{opacity:1} 90%{opacity:.55}
+      92%{opacity:1} 95%{opacity:.7} 97%{opacity:1} }
+  #start .subtitle { font-family:'Creepster', cursive; color:var(--bone);
+      font-size:min(7vw, 32px); letter-spacing:5px;
+      text-shadow:0 0 16px rgba(232,245,220,.45), 0 3px 10px rgba(0,0,0,.9); }
+  #start p { color:#cfe0c4; font-size:min(4.2vw, 17px); max-width:520px;
+      font-family:var(--hud); letter-spacing:.5px; text-shadow:0 2px 8px rgba(0,0,0,.9); }
+  #start .tiny { font-size:11px; opacity:.65; }
+  #classicLink { font-family:var(--hud); letter-spacing:1px; }
+  .bigbtn { font-size:min(6.5vw, 30px); font-family:var(--hud); letter-spacing:3px;
+      color:#9fe879; border:1px solid rgba(122,255,86,.55); padding:16px 46px;
+      border-radius:6px; background:rgba(4,16,8,.78);
+      box-shadow:0 0 24px rgba(122,255,86,.3), inset 0 0 18px rgba(122,255,86,.08),
+                 0 10px 26px rgba(0,0,0,.6);
+      animation:throb 2.4s ease-in-out infinite; }
+  @keyframes throb { 0%,100%{box-shadow:0 0 16px rgba(122,255,86,.22), 0 10px 26px rgba(0,0,0,.6)}
+      50%{box-shadow:0 0 36px rgba(140,255,95,.55), 0 10px 26px rgba(0,0,0,.6)} }
+  .bigbtn:active { transform:scale(.95); }
+  .softbtn { font-size:min(4vw, 16px); color:#cfe8c8; border:1px solid rgba(157,255,176,.35);
+      padding:11px 24px; border-radius:6px; background:rgba(4,14,8,.6);
+      font-family:var(--hud); letter-spacing:2px; }
+
+  /* ---------- 3D-only overlays ---------- */
+  #bootFail { position:fixed; inset:0; z-index:99; display:none; flex-direction:column;
+      align-items:center; justify-content:center; gap:18px; background:#020705;
+      color:#cfe0c4; font-family:var(--hud); letter-spacing:1px; text-align:center;
+      padding:24px; }
+  #bootFail a, #bootFail button { font-size:18px; color:#9fe879; padding:12px 28px;
+      border:1px solid var(--paneledge); border-radius:6px; background:rgba(4,16,8,.8);
+      text-decoration:none; }
+  #scare { position:fixed; inset:0; z-index:14; pointer-events:none; opacity:0;
+      transition:opacity .12s; }
+  #scare.show { opacity:1; transition:opacity .05s; }
+  #fx3d { position:fixed; inset:0; z-index:9; pointer-events:none; overflow:hidden; }
+  #fx3d .ptext { position:absolute; font-family:var(--hud); color:#aaff7a;
+      font-size:26px; letter-spacing:2px; text-shadow:0 0 12px rgba(122,255,86,.6),
+      0 2px 6px rgba(0,0,0,.9); transform:translate(-50%,-50%); opacity:0; }
+  #fx3d .ptext.go { animation:ptfloat .9s ease-out forwards; }
+  @keyframes ptfloat { 0%{opacity:1; transform:translate(-50%,-50%)}
+      100%{opacity:0; transform:translate(-50%,-130px)} }
+</style>
+</head>
+<body data-pip="br">
+
+<video id="cam" playsinline muted autoplay></video>
+<video id="remoteVid" playsinline autoplay></video>
+<canvas id="game"></canvas>
+<div id="pipTag"><span id="pipName"></span><button id="muteBtn" aria-label="Mute microphone">MIC</button></div>
+<div id="sendBadge"><span class="dot"></span><span id="sendTxt">ON CAMERA</span></div>
+
+<div id="score">0</div>
+<div id="banner"></div>
+<div id="combo"></div>
+<div id="chip"></div>
+<div id="pill" class="hidden"></div>
+<div id="hint"></div>
+
+<button id="gear" aria-label="Settings">MENU</button>
+<div id="panel" class="hidden">
+  <h3>ZOMBIE SPEED</h3>
+  <label>SLOW <input id="speed" type="range" min="0.5" max="1.6" step="0.05"> FAST</label>
+  <div id="audState"></div>
+  <div id="roomSec">
+    <h3>HUNT TOGETHER</h3>
+    <div id="codeRow"><span id="genCode"></span><button id="newCode" aria-label="New code">&#8635;</button></div>
+    <p class="tiny2">Share this code with the other device — or type your own below.</p>
+    <input id="pname" maxlength="12" placeholder="Your name" autocomplete="off">
+    <input id="pcode" maxlength="24" placeholder="Custom code (optional)" autocapitalize="characters" autocomplete="off">
+    <button id="joinBtn">JOIN ROOM</button>
+    <button id="vsBtn" class="hidden">VERSUS — TAKE TURNS (BEST OF 3)</button>
+    <div id="roomStatus"></div>
+  </div>
+  <button id="closePanel">DONE</button>
+</div>
+
+<div id="board"></div>
+<div id="vov" class="hidden">
+  <div class="v1"></div>
+  <div class="v2"></div>
+  <div class="v3"></div>
+</div>
+<div id="tbar"></div>
+
+<div id="start">
+  <h1>Zombie Hunter</h1>
+  <p class="subtitle">— Survive the night —</p>
+  <p>Wave your hand (or swipe a finger) to slash what comes out of the fog. No lives. No game over. Only the night.</p>
+  <button id="btnCam" class="bigbtn">START — CAMERA ON</button>
+  <button id="btnTouch" class="softbtn">HUNT WITHOUT CAMERA</button>
+  <p class="tiny">The camera lets you slash by waving — video never leaves your device.</p>
+  <a id="classicLink" href="classic.html" style="color:#9db; font-size:12px; opacity:.7;">CLASSIC 2D MODE</a>
+</div>
+
+<div id="bootFail">
+  <div>THE 3D NIGHT COULD NOT LOAD</div>
+  <a href="classic.html">PLAY CLASSIC MODE</a>
+  <button onclick="location.reload()">RETRY</button>
+</div>
+
+<!-- claw scare: three streaks, near-black with a toxic rim — never red -->
+<svg id="scare" viewBox="0 0 100 100" preserveAspectRatio="none">
+  <g fill="none" stroke-linecap="round">
+    <path d="M22 8 Q 50 38 36 96" stroke="rgba(122,255,86,.30)" stroke-width="7"/>
+    <path d="M46 4 Q 64 44 56 99" stroke="rgba(122,255,86,.30)" stroke-width="8"/>
+    <path d="M72 10 Q 82 48 78 94" stroke="rgba(122,255,86,.30)" stroke-width="6"/>
+    <path d="M22 8 Q 50 38 36 96" stroke="rgba(3,10,5,.92)" stroke-width="4.5"/>
+    <path d="M46 4 Q 64 44 56 99" stroke="rgba(3,10,5,.92)" stroke-width="5.5"/>
+    <path d="M72 10 Q 82 48 78 94" stroke="rgba(3,10,5,.92)" stroke-width="4"/>
+  </g>
+</svg>
+<div id="fx3d"></div>
+
+<script type="module">
+/* =====================================================================
+   ZOMBIE HUNTER 3D — first-person night street. No lives, no game over:
+   the things in the fog just keep coming. The hand tracking, audio,
+   room, Versus and video systems are the proven engine from the 2D
+   game (alive forever in classic.html), ported behavior-identical.
+   ===================================================================== */
+import * as THREE from 'three';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js';
+import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
+
+// ---------- tiny helpers ----------
+const $ = id => document.getElementById(id);
+const rand = (a, b) => a + Math.random() * (b - a);
+const canvas = $('game'); // WebGL canvas — no 2D context may ever touch it
+const cam = $('cam');
+
+// ---------- sizing: W/H are CSS pixels ----------
+// All input, tracking and hit-testing live in CSS pixel space; the GPU's
+// pixel ratio is a quality knob that can never change a hitbox.
+let W = innerWidth, H = innerHeight;
+function resize() {
+  W = innerWidth; H = innerHeight;
+  if (renderer) {
+    camera.aspect = W / H;
+    camera.updateProjectionMatrix();
+    renderer.setSize(W, H);
+    composer.setSize(W, H);
+  }
+}
+addEventListener('resize', resize);
+addEventListener('orientationchange', () => setTimeout(resize, 300)); // iOS reports sizes late
+if (window.visualViewport) visualViewport.addEventListener('resize', resize);
+
+// ---------- settings (one slider: zombie speed, saved between visits) ----------
+let speedMul = 0.8; // gentle default for small kids
+try { speedMul = parseFloat(localStorage.getItem('zh_speed')) || 0.8; } catch (e) {}
+$('speed').value = speedMul;
+$('speed').addEventListener('input', e => {
+  speedMul = parseFloat(e.target.value);
+  try { localStorage.setItem('zh_speed', speedMul); } catch (err) {}
+});
+$('gear').addEventListener('click', () => { $('panel').classList.toggle('hidden'); updateAudState(); });
+$('closePanel').addEventListener('click', () => $('panel').classList.add('hidden'));
+
+// ---------- sounds: tiny synthesized WebAudio, no files needed ----------
+// iOS rules, all handled here:
+// - an AudioContext only makes sound after being created/resumed inside a
+//   real user tap, so initAudio() runs in every button/touch handler
+// - starting the camera can flip the context to webkit's 'interrupted'
+//   state (not 'suspended'!), so we resume whenever state !== 'running',
+//   from onstatechange, visibility/pageshow, and any tap on the page
+// - the ringer/silent switch mutes WebAudio while the page is in the
+//   default 'ambient' audio session: we ask for a 'playback' session
+//   (iOS 17+) AND loop a tiny inline silent <audio> (older iOS), which is
+//   what real games do so they play regardless of the switch
+let AC = null, silentEl = null;
+
+// 0.25s of 8-bit mono silence as a WAV data URI — built right here in JS,
+// nothing fetched from the network
+function silentWavURI() {
+  const rate = 8000, n = rate / 4, len = 44 + n;
+  const b = new Uint8Array(len), dv = new DataView(b.buffer);
+  const str = (off, s) => { for (let i = 0; i < s.length; i++) b[off + i] = s.charCodeAt(i); };
+  str(0, 'RIFF'); dv.setUint32(4, len - 8, true); str(8, 'WAVE');
+  str(12, 'fmt '); dv.setUint32(16, 16, true);
+  dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);      // PCM, mono
+  dv.setUint32(24, rate, true); dv.setUint32(28, rate, true); // sample/byte rate
+  dv.setUint16(32, 1, true); dv.setUint16(34, 8, true);       // align, 8-bit
+  str(36, 'data'); dv.setUint32(40, n, true);
+  b.fill(128, 44); // 128 = silence midpoint for 8-bit PCM
+  let s = ''; for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]);
+  return 'data:audio/wav;base64,' + btoa(s);
+}
+
+// 'playback' beats the ringer switch; once a mic is live (video call) the
+// correct session is 'play-and-record' — both keep game sound audible
+function sessType() {
+  const s = cam.srcObject;
+  return s && s.getAudioTracks().some(t => t.readyState === 'live') ? 'play-and-record' : 'playback';
+}
+
+function initAudio() {
+  try {
+    try { if (navigator.audioSession) navigator.audioSession.type = sessType(); } catch (e) {}
+    if (!AC) {
+      AC = new (window.AudioContext || window.webkitAudioContext)();
+      AC.onstatechange = () => {
+        if (AC.state !== 'running') { try { AC.resume().catch(() => {}); } catch (e) {} }
+        updateAudState();
+      };
+    }
+    if (AC.state !== 'running') { try { AC.resume().catch(() => {}); } catch (e) {} }
+    if (!silentEl) {
+      silentEl = document.createElement('audio');
+      silentEl.src = silentWavURI();
+      silentEl.loop = true;
+      silentEl.setAttribute('playsinline', '');
+      silentEl.play().catch(() => {});
+    } else if (silentEl.paused) silentEl.play().catch(() => {});
+  } catch (e) {}
+  updateAudState();
+}
+
+// gentle retry from anywhere a gesture or wake-up happens
+function kickAudio() {
+  try {
+    if (navigator.audioSession) navigator.audioSession.type = sessType();
+    if (AC && AC.state !== 'running') AC.resume().catch(() => {});
+    if (silentEl && silentEl.paused) silentEl.play().catch(() => {});
+    // remote call video needs the same gesture-based resume on iOS
+    if (remoteVid && remoteVid.srcObject && remoteVid.paused) remoteVid.play().catch(() => {});
+  } catch (e) {}
+  updateAudState();
+}
+document.addEventListener('pointerdown', kickAudio, { passive: true });
+document.addEventListener('touchstart', kickAudio, { passive: true });
+document.addEventListener('visibilitychange', () => { if (!document.hidden) kickAudio(); });
+addEventListener('pageshow', kickAudio);
+
+// live audio-state line in the settings panel (debugging on a phone)
+function updateAudState() {
+  const el = $('audState');
+  if (!el || $('panel').classList.contains('hidden')) return;
+  let sess = '';
+  try { if (navigator.audioSession) sess = ' · session: ' + navigator.audioSession.type; } catch (e) {}
+  el.textContent = 'AUDIO: ' + (AC ? AC.state : 'not started — tap START first') + sess;
+}
+setInterval(updateAudState, 1000);
+function tone(f0, f1, dur, type, vol, delay) {
+  if (!AC) return;
+  const t = AC.currentTime + (delay || 0);
+  const o = AC.createOscillator(), g = AC.createGain();
+  o.type = type || 'sine';
+  o.frequency.setValueAtTime(f0, t);
+  o.frequency.exponentialRampToValueAtTime(Math.max(f1, 1), t + dur);
+  g.gain.setValueAtTime(vol || .4, t);
+  g.gain.exponentialRampToValueAtTime(.001, t + dur);
+  o.connect(g).connect(AC.destination);
+  o.start(t); o.stop(t + dur + .05);
+}
+// shared noise maker: a decaying noise burst through one filter — this is
+// the raw material for splats, rasps and thunder
+function noiseBurst(dur, type, freq, q, vol, delay) {
+  if (!AC) return;
+  const t0 = AC.currentTime + (delay || 0);
+  const len = Math.max(1, Math.floor(AC.sampleRate * dur));
+  const buf = AC.createBuffer(1, len, AC.sampleRate), d = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2);
+  const src = AC.createBufferSource(); src.buffer = buf;
+  const f = AC.createBiquadFilter(); f.type = type; f.frequency.value = freq; f.Q.value = q;
+  const g = AC.createGain(); g.gain.value = vol;
+  src.connect(f); f.connect(g); g.connect(AC.destination);
+  src.start(t0);
+}
+
+function playPop(pitchUp) { // wet slash-splat (combos pitch it up)
+  if (!AC) return;
+  const p = pitchUp || 1;
+  tone(150 * p, 45, .16, 'square', .32);                 // squelchy body
+  tone(420 * p, 90, .07, 'sawtooth', .16);               // the blade's edge
+  noiseBurst(.12, 'lowpass', 900 * Math.sqrt(p), 2.5, .5, 0); // the wet part
+}
+function playGrunt() { // brute takes a hit
+  tone(130, 60, .18, 'square', .35);
+  noiseBurst(.1, 'lowpass', 500, 1, .25, 0);
+}
+function playGroan() { // low zombie moan wobbling downward
+  if (!AC) return;
+  const t = AC.currentTime;
+  const o = AC.createOscillator(), g = AC.createGain();
+  o.type = 'sawtooth';
+  o.frequency.setValueAtTime(95, t);
+  o.frequency.linearRampToValueAtTime(70, t + .35);
+  o.frequency.linearRampToValueAtTime(82, t + .6);
+  o.frequency.linearRampToValueAtTime(55, t + 1);
+  const f = AC.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 320; f.Q.value = 4;
+  g.gain.setValueAtTime(.0001, t);
+  g.gain.exponentialRampToValueAtTime(.2, t + .12);
+  g.gain.exponentialRampToValueAtTime(.001, t + 1.05);
+  o.connect(f); f.connect(g); g.connect(AC.destination);
+  o.start(t); o.stop(t + 1.1);
+}
+function playWhisper() { // ghoul: a cold draft of air
+  noiseBurst(.5, 'highpass', 2400, .6, .05, 0);
+  tone(420, 200, .5, 'sine', .05);
+}
+function playScreech() { // bat: two falling chirps
+  tone(2600, 1100, .12, 'square', .12);
+  tone(2100, 900, .1, 'square', .1, .13);
+}
+function playRoar(big) { // brute: layered low growl that rears up then drops
+  if (!AC) return;
+  const t = AC.currentTime, dur = big ? .9 : .5, v = big ? .5 : .28;
+  for (const [f0, f1, type] of [[60, 38, 'sawtooth'], [92, 55, 'square']]) {
+    const o = AC.createOscillator(), g = AC.createGain();
+    o.type = type;
+    o.frequency.setValueAtTime(f0, t);
+    o.frequency.linearRampToValueAtTime(f0 * 1.25, t + dur * .3);
+    o.frequency.exponentialRampToValueAtTime(f1, t + dur);
+    g.gain.setValueAtTime(.0001, t);
+    g.gain.exponentialRampToValueAtTime(v, t + .06);
+    g.gain.exponentialRampToValueAtTime(.001, t + dur);
+    o.connect(g).connect(AC.destination);
+    o.start(t); o.stop(t + dur + .05);
+  }
+  noiseBurst(dur * .8, 'lowpass', 240, 1.5, v * .5, 0); // breathy rasp
+}
+function playThunder(soft) { // deep rolling rumble, two overlapping waves
+  if (!AC) return;
+  const v = soft ? .16 : .5;
+  noiseBurst(1.6, 'lowpass', 140, .8, v, 0);
+  noiseBurst(2.2, 'lowpass', 90, .8, v * .8, .25);
+  tone(70, 32, 1.2, 'sine', v * .7, .05); // the body-shaking bottom end
+}
+function playHowl() { // lonely wolf: rise, hold with vibrato, fall away
+  if (!AC) return;
+  const t = AC.currentTime;
+  const o = AC.createOscillator(), g = AC.createGain();
+  o.type = 'sine';
+  o.frequency.setValueAtTime(260, t);
+  o.frequency.linearRampToValueAtTime(540, t + .45);
+  for (let i = 0; i <= 12; i++) // vibrato on the held note
+    o.frequency.linearRampToValueAtTime(520 + (i % 2 ? 26 : -26), t + .5 + i * .06);
+  o.frequency.linearRampToValueAtTime(330, t + 1.55);
+  g.gain.setValueAtTime(.0001, t);
+  g.gain.exponentialRampToValueAtTime(.32, t + .2);
+  g.gain.setValueAtTime(.32, t + 1.1);
+  g.gain.exponentialRampToValueAtTime(.001, t + 1.6);
+  o.connect(g).connect(AC.destination);
+  o.start(t); o.stop(t + 1.7);
+}
+function playClaw() { // an enemy got too close: three fabric-rip rasps
+  noiseBurst(.22, 'highpass', 1800, 1.2, .4, 0);
+  noiseBurst(.18, 'highpass', 2200, 1.2, .35, .06);
+  noiseBurst(.2, 'highpass', 1500, 1.2, .38, .12);
+}
+function playCheer() {
+  [523, 659, 784, 1047].forEach((fq, i) => tone(fq, fq, .25, 'triangle', .3, i * .09));
+  tone(1568, 2093, .35, 'sine', .2, .42);
+}
+
+// ---------- game state ----------
+let enemies = [];
+let score = 0, kills = 0, running = false, nextSpawn = 0, MAXF = 8;
+
+/* ---------- the horde: five enemy kinds (data) ----------
+   hp / pts / spawn weight are the proven 2D values. How each kind looks
+   and moves in 3D lives in the world section (next milestone). */
+const KINDS = [
+  { id:'shambler', w:30, hp:1, pts:1 },
+  { id:'crawler',  w:22, hp:1, pts:1 },
+  { id:'ghoul',    w:22, hp:1, pts:1 },
+  { id:'bat',      w:19, hp:1, pts:1 },
+  { id:'brute',    w:7,  hp:3, pts:5 },
+];
+
+/* ---------- photoreal sprites (spooky mode, Milestone 6) ----------
+   PNGs in sprites/ replace the drawn bodies whenever Silly mode is off.
+   All five load + decode behind the title screen, then get analyzed ONCE
+   on a scratch canvas: the alpha bounding box sizes the hit circle to the
+   VISIBLE creature (not the file rectangle), and clusters of bright green
+   pixels locate the eyes for the pulsing glow overlay. A sprite that
+   fails to load simply leaves that enemy on its drawn fallback — missing
+   art can never break the game. Render time is plain drawImage from the
+   pre-decoded image: no ctx.filter, nothing computed per frame. */
+const PHOTO_FILES = { shambler: 'sprites/zombie.png', crawler: 'sprites/crawler.png',
+                      ghoul: 'sprites/ghoul.png', bat: 'sprites/bat.png',
+                      brute: 'sprites/brute.png' };
+const photos = {}; // kindId -> { img, sx, sy, sw, sh, aspect, eyes:[[nx,ny],..] }
+let photosPending = Object.keys(PHOTO_FILES).length;
+
+function analyzePhoto(img) {
+  const MAXA = 384; // a downsized scan is plenty accurate and 10x faster
+  const k = Math.min(1, MAXA / Math.max(img.naturalWidth, img.naturalHeight));
+  const aw = Math.max(1, Math.round(img.naturalWidth * k));
+  const ah = Math.max(1, Math.round(img.naturalHeight * k));
+  const c = document.createElement('canvas');
+  c.width = aw; c.height = ah;
+  const g = c.getContext('2d', { willReadFrequently: true });
+  g.drawImage(img, 0, 0, aw, ah);
+  let d;
+  try { d = g.getImageData(0, 0, aw, ah).data; } catch (e) { return null; }
+  let x0 = aw, y0 = ah, x1 = -1, y1 = -1;
+  const eyePts = [];
+  for (let y = 0; y < ah; y++) for (let x = 0; x < aw; x++) {
+    const i = (y * aw + x) * 4;
+    if (d[i + 3] > 30) {
+      if (x < x0) x0 = x; if (x > x1) x1 = x;
+      if (y < y0) y0 = y; if (y > y1) y1 = y;
+      const r = d[i], gr = d[i + 1], b = d[i + 2];
+      if (gr > 140 && gr > r * 1.35 && gr > b * 1.35) eyePts.push([x, y, gr]);
+    }
+  }
+  if (x1 < 0) return null;
+  // split the glowing pixels left/right and average — at most two eyes.
+  // Bias to the HOTTEST pixels (the iris cores) and require candidates to
+  // sit roughly level, so pale rim-light along an edge can't drag a glow
+  // off the face.
+  let eyes = [];
+  if (eyePts.length > 3) {
+    const hot = eyePts.filter(p => p[2] >= 220);
+    let pts = hot.length >= 6 ? hot : eyePts;
+    const ys = pts.map(p => p[1]).sort((a, b) => a - b);
+    const medY = ys[Math.floor(ys.length / 2)], band = (y1 - y0 + 1) * .12;
+    const level = pts.filter(p => Math.abs(p[1] - medY) <= band);
+    if (level.length >= 4) pts = level;
+    pts.sort((p, q) => p[0] - q[0]);
+    const mid = pts[Math.floor(pts.length / 2)][0];
+    const avg = a => a.length ? [a.reduce((s, p) => s + p[0], 0) / a.length,
+                                 a.reduce((s, p) => s + p[1], 0) / a.length] : null;
+    eyes = [avg(pts.filter(p => p[0] <= mid)), avg(pts.filter(p => p[0] > mid))]
+      .filter(Boolean)
+      .map(([ex, ey]) => [(ex - x0) / (x1 - x0 + 1), (ey - y0) / (y1 - y0 + 1)]);
+    if (eyes.length === 2 &&
+        Math.hypot(eyes[0][0] - eyes[1][0], eyes[0][1] - eyes[1][1]) < .06)
+      eyes = [eyes[0]]; // both clusters on one spot = a single eye/mouth glow
+  }
+  const s = 1 / k;
+  return { img, sx: x0 * s, sy: y0 * s, sw: (x1 - x0 + 1) * s, sh: (y1 - y0 + 1) * s,
+           aspect: (x1 - x0 + 1) / (y1 - y0 + 1), eyes };
+}
+
+for (const [kid, src] of Object.entries(PHOTO_FILES)) {
+  const img = new Image();
+  img.onload = () => { // decode() finishes decompression off the game's hot path
+    const fin = () => { const a = analyzePhoto(img); if (a) photos[kid] = a; photosPending--; };
+    img.decode ? img.decode().then(fin, fin) : fin();
+  };
+  img.onerror = () => { photosPending--; }; // stays on the drawn fallback
+  img.src = src;
+}
+
+// one soft green glow stamp, drawn once and scaled over each detected eye
+const eyeGlowSpr = (() => {
+  const c = document.createElement('canvas');
+  c.width = c.height = 64;
+  const g = c.getContext('2d');
+  const rg = g.createRadialGradient(32, 32, 2, 32, 32, 30);
+  rg.addColorStop(0, 'rgba(214,255,176,.95)');
+  rg.addColorStop(.35, 'rgba(130,255,90,.5)');
+  rg.addColorStop(1, 'rgba(130,255,90,0)');
+  g.fillStyle = rg;
+  g.fillRect(0, 0, 64, 64);
+  return c;
+})();
+
+let lastBrute = 0;
+function pickKind(now) {
+  // the brute is rare: never in the first 15s, never twice within 14s
+  const bruteOK = now > 15000 && now - lastBrute > 14000;
+  let total = 0;
+  for (const k of KINDS) total += (k.id === 'brute' && !bruteOK) ? 0 : k.w;
+  let roll = Math.random() * total;
+  for (const k of KINDS) {
+    const w = (k.id === 'brute' && !bruteOK) ? 0 : k.w;
+    if ((roll -= w) < 0) return k;
+  }
+  return KINDS[0];
+}
+
+/* ---------- slicing: blade trails + collision ----------
+   Every input source gets its own trail: each touching finger, the mouse,
+   and each tracked hand. A trail is just the last ~0.3s of points. The
+   math is the proven 2D engine, fed by 3D screen-space projections. */
+const TRAIL_MS = 280;
+const trails = new Map();
+let hueSeed = 0;
+
+// every blade gets a toxic green tone of its own (still tells two hands apart)
+const BLADE_HUES = [96, 110, 122, 134];
+
+function addTrailPoint(key, x, y) {
+  let tr = trails.get(key);
+  if (!tr) { tr = { pts: [], hue: BLADE_HUES[(hueSeed++) % BLADE_HUES.length] }; trails.set(key, tr); }
+  const prev = tr.pts[tr.pts.length - 1];
+  tr.pts.push({ x, y, t: performance.now() });
+  if (tr.pts.length > 40) tr.pts.shift();
+  if (!running) return;
+  // ember sparks spit off the moving blade, dropped into world space
+  if (prev && fxAdd && Math.random() < .5) {
+    unprojectAt(x, y, _ua);
+    const orange = Math.random() > .7;
+    fxAdd.spawn(_ua.x, _ua.y, _ua.z,
+                rand(-.5, .5), rand(-.2, .6), rand(-.3, .1),
+                rand(.25, .45), rand(.05, .1), 0,
+                orange ? 1.7 : .9, orange ? 1.0 : 1.9, orange ? .3 : .55);
+  }
+  // Hand blades get extra forgiveness: tracking runs at ~15Hz and a waving
+  // arm is not a stylus, so the hit radius is bigger than for touch.
+  const pad = key.startsWith('hand') ? 22 : 8;
+  // Collision is checked on the SEGMENT between the last two points, so a
+  // fast swipe can't tunnel through an enemy between frames...
+  if (prev) checkSlice(prev.x, prev.y, x, y, pad);
+  // ...and also on the newest point alone, so a zombie drifting into a
+  // resting fingertip still goes down (perfect for 2-year-olds).
+  pointCheck(x, y, pad + 2);
+}
+
+// Classic point-to-segment distance: project P onto AB, clamp, measure.
+function segPointDist(ax, ay, bx, by, px, py) {
+  const dx = bx - ax, dy = by - ay, len2 = dx * dx + dy * dy;
+  const t = len2 ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / len2)) : 0;
+  return Math.hypot(ax + t * dx - px, ay + t * dy - py);
+}
+// Collision runs in SCREEN space: every frame each enemy's 3D position is
+// projected to CSS pixels (e.sx, e.sy) with a radius (e.sr) sized to how big
+// the creature looks right now — so the trail math is identical to 2D.
+function checkSlice(x1, y1, x2, y2, pad) {
+  for (let i = enemies.length - 1; i >= 0; i--) {
+    const e = enemies[i];
+    if (e.hittable && segPointDist(x1, y1, x2, y2, e.sx, e.sy) < e.sr + pad)
+      slashEnemy(i, Math.atan2(y2 - y1, x2 - x1));
+  }
+}
+function pointCheck(x, y, pad) {
+  for (let i = enemies.length - 1; i >= 0; i--) {
+    const e = enemies[i];
+    if (e.hittable && Math.hypot(e.sx - x, e.sy - y) < e.sr + pad)
+      slashEnemy(i, rand(0, Math.PI));
+  }
+}
+
+// combo: kills landing within 1s of each other raise the splat pitch and
+// pop a x2/x3 callout — very satisfying
+let comboN = 0, comboT = 0;
+let onScoreChange = () => {}; // the optional shared room hooks in here
+
+function showCombo(n) {
+  const c = $('combo');
+  c.textContent = 'x' + n;
+  c.classList.add('show');
+  clearTimeout(showCombo.t);
+  showCombo.t = setTimeout(() => c.classList.remove('show'), 900);
+}
+
+// screen shake: kills bump it up, the draw loop jitters by it as it decays
+let shakeAmp = 0;
+function addShake(a) { shakeAmp = Math.min(12, shakeAmp + a); }
+
+// glowing green ichor — never red
+const ICHOR = ['#7dff5e', '#4ddb3a', '#b6ff7a', '#2fae22'];
+
+const PRAISE = ['FEARLESS!', 'UNSTOPPABLE!', 'NIGHT STALKER!', 'MONSTER SLAYER!',
+                'LEGENDARY!', 'UNDEAD UNDONE!'];
+function celebrate() { // every 25 kills: a private lightning storm
+  bannerShow(PRAISE[(kills / 25 - 1) % PRAISE.length] + '  ' + kills, 1900);
+  lightning();
+  setTimeout(lightning, 420);
+  setTimeout(lightning, 880);
+  setTimeout(playHowl, 520);
+}
+
+// ---------- physics + drawing ----------
+function update(dt, now) {
+  // in a Versus match, things only come out of the fog during YOUR turn
+  const maySpawn = !versus || versus.playing;
+  if (maySpawn && now > nextSpawn && enemies.length < MAXF) {
+    spawn();
+    nextSpawn = now + rand(1400, 2200) / speedMul;
+  }
+  updateEnemies(dt, now);
+  updateCorpses(dt);
+  if (fxAdd) { fxAdd.update(dt); fxSmoke.update(dt); }
+  if (!nextStorm) nextStorm = now + rand(30000, 60000);
+  if (now > nextStorm) {
+    lightning();
+    nextStorm = now + rand(30000, 60000);
+  }
+  if (shakeAmp > 0) shakeAmp = Math.max(0, shakeAmp - 26 * dt);
+}
+
+/* =====================================================================
+   THE NIGHT — Three.js world.
+   Realism strategy: heavy exponential fog + one cold moon light + warm
+   point-light fires + bloom on deliberate emitters + grain/vignette in
+   a single grade pass. Geometry is merged silhouette boxes; the fog
+   does the detail work. No shadow maps anywhere.
+   ===================================================================== */
+let renderer = null, scene3, camera, composer, bloomPass, gradePass;
+let dirLight, ambLight, moonHalo, camBaseQ = null;
+let fires = [], windowGroups = [], hordeBoards = [];
+const FOG_COLOR = 0x041208, FOG_D = 0.055;
+let PARTICLE_K = 1, degradeStep = 0, __fps = 60;
+
+// lightning: the 2D game's exact double-blink envelope, now driving the
+// lights, the fog density (a strike burns the fog back) and the post chain
+let flash = 0, flashAt = -9e9, hordeUntil = 0, nextStorm = 0;
+function lightning() {
+  flashAt = performance.now();
+  hordeUntil = flashAt + 1000;
+  addShake(3);
+  playThunder();
+}
+
+// final color pass: vignette + animated grain + lightning wash + scare tint
+const GradeShader = {
+  uniforms: { tDiffuse: { value: null }, uTime: { value: 0 }, uGrain: { value: .034 },
+              uFlash: { value: 0 }, uScare: { value: 0 } },
+  vertexShader: 'varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }',
+  fragmentShader: [
+    'uniform sampler2D tDiffuse; uniform float uTime,uGrain,uFlash,uScare;',
+    'varying vec2 vUv;',
+    'float hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }',
+    'void main(){',
+    '  vec4 c = texture2D(tDiffuse, vUv);',
+    '  float d = distance(vUv, vec2(.5,.46));',
+    '  c.rgb *= 1.0 - smoothstep(.4,1.0,d)*.66;',
+    '  c.rgb += (hash(vUv*977.0 + mod(uTime,97.0)) - .5) * uGrain;',
+    '  c.rgb = mix(c.rgb, vec3(.83,1.0,.85), uFlash*.34);',
+    '  c.rgb = mix(c.rgb, vec3(.04,.12,.06), uScare*smoothstep(.2,.85,d));',
+    '  gl_FragColor = c;',
+    '}'].join('\n')
+};
+
+// dark procedural stand-ins if textures/ is missing — the fog covers them
+function makeProceduralTex(kind) {
+  const c = document.createElement('canvas');
+  c.width = c.height = 256;
+  const g = c.getContext('2d');
+  if (kind === 'brick') {
+    g.fillStyle = '#2a1b16'; g.fillRect(0, 0, 256, 256);
+    g.fillStyle = '#33221b';
+    for (let y = 0; y < 16; y++) for (let x = 0; x < 8; x++)
+      g.fillRect(x * 32 + (y % 2 ? 16 : 0) + 1, y * 16 + 1, 30, 14);
+  } else {
+    g.fillStyle = '#15191a'; g.fillRect(0, 0, 256, 256);
+    const d = g.createImageData(256, 256);
+    for (let i = 0; i < d.data.length; i += 4) {
+      const v = 16 + Math.random() * 18;
+      d.data[i] = v; d.data[i + 1] = v + 3; d.data[i + 2] = v; d.data[i + 3] = 255;
+    }
+    g.putImageData(d, 0, 0);
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  return t;
+}
+
+// committed Poly Haven JPGs (CC0 — see README); procedural fallback on 404
+function loadStreetTex(file, kind, repX, repY, onto) {
+  const apply = t => {
+    t.colorSpace = THREE.SRGBColorSpace;
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.repeat.set(repX, repY);
+    t.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+    onto.map = t;
+    onto.needsUpdate = true;
+  };
+  new THREE.TextureLoader().load('textures/' + file, apply,
+    undefined, () => apply(makeProceduralTex(kind)));
+}
+
+// a gaunt dark silhouette with glowing eyes — the only acceptable stand-in
+// (lightning horde now; the missing-sprite billboard fallback in M2)
+function makeSilhouetteTex() {
+  const c = document.createElement('canvas');
+  c.width = 128; c.height = 256;
+  const g = c.getContext('2d');
+  g.fillStyle = '#020503';
+  g.beginPath(); g.ellipse(64, 52, 22, 26, 0, 0, 7); g.fill();
+  g.beginPath(); g.moveTo(34, 250);
+  g.lineTo(40 + rand(-6, 6), 96); g.lineTo(64, 70); g.lineTo(88 + rand(-6, 6), 96);
+  g.lineTo(94, 250); g.closePath(); g.fill();
+  g.lineWidth = 9; g.strokeStyle = '#020503'; g.lineCap = 'round';
+  g.beginPath(); g.moveTo(42, 110); g.lineTo(14 + rand(-6, 6), 60 + rand(-14, 14)); g.stroke();
+  g.beginPath(); g.moveTo(86, 110); g.lineTo(114 + rand(-6, 6), 70 + rand(-14, 14)); g.stroke();
+  for (const ex of [54, 74]) {
+    const rg = g.createRadialGradient(ex, 50, 0, ex, 50, 9);
+    rg.addColorStop(0, 'rgba(170,255,120,.95)');
+    rg.addColorStop(1, 'rgba(170,255,120,0)');
+    g.fillStyle = rg; g.beginPath(); g.arc(ex, 50, 9, 0, 7); g.fill();
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+
+function initWorld() {
+  renderer = new THREE.WebGLRenderer({ canvas, antialias: false,
+                                       powerPreference: 'high-performance' });
+  renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 1.5)); // perf budget cap
+  renderer.setSize(W, H);
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.5;
+
+  scene3 = new THREE.Scene();
+  scene3.background = new THREE.Color(FOG_COLOR);
+  scene3.fog = new THREE.FogExp2(FOG_COLOR, FOG_D);
+
+  camera = new THREE.PerspectiveCamera(70, W / H, .1, 140);
+  camera.position.set(0, 1.6, 0);
+  camera.lookAt(0, 1.2, -12);
+  camBaseQ = camera.quaternion.clone();
+
+  ambLight = new THREE.AmbientLight(0x1c3a26, 1.05);
+  dirLight = new THREE.DirectionalLight(0xbcd4ff, 1.1);
+  dirLight.position.set(-14, 30, -20);
+  scene3.add(ambLight, dirLight);
+
+  // ground: wet asphalt — low roughness + the cold moonlight = the sheen
+  const groundMat = new THREE.MeshStandardMaterial({ color: 0x4a554c, roughness: .35, metalness: .18 });
+  loadStreetTex('asphalt_diff_1k.jpg', 'asphalt', 4, 16, groundMat);
+  const ground = new THREE.Mesh(new THREE.PlaneGeometry(22, 90), groundMat);
+  ground.rotation.x = -Math.PI / 2;
+  ground.position.set(0, 0, -34);
+  scene3.add(ground);
+
+  // near buildings: merged brick slabs flanking the street (one draw call).
+  // Each slab remembers its street-facing wall so windows sit flush on it.
+  const nearGeos = [], walls = [];
+  for (let i = 0; i < 12; i++) {
+    const side = i % 2 ? 1 : -1;
+    const bw = rand(5, 9), bh = rand(7, 19), bd = rand(6, 10);
+    const cx = side * (8.2 + bw / 2); // inner face lands at exactly |x| = 8.2
+    const cz = -4 - i * 5.4 + rand(-1.5, 1.5);
+    const g2 = new THREE.BoxGeometry(bw, bh, bd);
+    g2.translate(cx, bh / 2 - .1, cz);
+    nearGeos.push(g2);
+    walls.push({ side, x: side * 8.2, h: bh, z0: cz - bd / 2, z1: cz + bd / 2 });
+  }
+  const brickMat = new THREE.MeshLambertMaterial({ color: 0x8a9388 });
+  loadStreetTex('brick_diff_1k.jpg', 'brick', 2, 2, brickMat);
+  scene3.add(new THREE.Mesh(BufferGeometryUtils.mergeGeometries(nearGeos), brickMat));
+
+  // far skyline: silhouettes darker than the fog (fog:false is the trick —
+  // honest fogging would erase them entirely)
+  const farGeos = [];
+  for (let i = 0; i < 14; i++) {
+    const bw = rand(6, 12), bh = rand(8, 17); // low enough that the moon clears them
+    const g2 = new THREE.BoxGeometry(bw, bh, 5);
+    g2.translate((Math.random() < .5 ? -1 : 1) * rand(8, 16), bh / 2, -44 - i * 1.8);
+    farGeos.push(g2);
+  }
+  scene3.add(new THREE.Mesh(BufferGeometryUtils.mergeGeometries(farGeos),
+    new THREE.MeshBasicMaterial({ color: 0x020a05, fog: false })));
+
+  // street debris: rubble, a flipped car shape, a leaning pole (one draw call)
+  const debGeos = [];
+  for (let i = 0; i < 10; i++) {
+    const g2 = new THREE.BoxGeometry(rand(.5, 1.6), rand(.3, 1), rand(.5, 1.4));
+    g2.rotateY(rand(0, 3)); g2.rotateZ(rand(-.2, .2));
+    g2.translate(rand(-6.5, 6.5), rand(.15, .5), -rand(4, 30));
+    debGeos.push(g2);
+  }
+  const carBody = new THREE.BoxGeometry(2, .8, 4.4);
+  carBody.rotateZ(2.8);
+  carBody.translate(-4.8, .9, -13);
+  const pole = new THREE.CylinderGeometry(.07, .09, 6);
+  pole.rotateZ(.3);
+  pole.translate(5.6, 2.6, -9);
+  debGeos.push(carBody, pole);
+  scene3.add(new THREE.Mesh(BufferGeometryUtils.mergeGeometries(debGeos),
+    new THREE.MeshLambertMaterial({ color: 0x10150f })));
+
+  // emissive windows flush on real walls, 3 flicker groups; >1 color blooms
+  for (let gi = 0; gi < 3; gi++) {
+    const quads = [];
+    for (let i = 0; i < 8; i++) {
+      const wall = walls[(gi * 8 + i) % walls.length];
+      const q = new THREE.PlaneGeometry(.7, 1);
+      q.rotateY(wall.side > 0 ? -Math.PI / 2 : Math.PI / 2);
+      q.translate(wall.x - wall.side * .04, rand(2, Math.max(3, wall.h - 2)),
+                  rand(wall.z0 + .8, wall.z1 - .8));
+      quads.push(q);
+    }
+    const m = new THREE.MeshBasicMaterial({ color: 0xff8a2e });
+    windowGroups.push(m);
+    scene3.add(new THREE.Mesh(BufferGeometryUtils.mergeGeometries(quads), m));
+  }
+
+  // the moon: ignores fog, bright enough to bloom, plus an additive halo.
+  // Sits high mid-left where no building can mask it.
+  // kept BELOW the bloom threshold: the halo sprite is its glow, so the
+  // bloom pass stays reserved for true emitters (windows, eyes, the blade)
+  const moon = new THREE.Mesh(new THREE.CircleGeometry(4.6, 32),
+    new THREE.MeshBasicMaterial({ color: new THREE.Color(.8, .86, .78), fog: false }));
+  moon.position.set(-7, 29, -75);
+  moon.lookAt(camera.position);
+  scene3.add(moon);
+  const haloC = document.createElement('canvas');
+  haloC.width = haloC.height = 128;
+  const hg = haloC.getContext('2d');
+  const hgrad = hg.createRadialGradient(64, 64, 6, 64, 64, 64);
+  hgrad.addColorStop(0, 'rgba(205,255,205,.6)');
+  hgrad.addColorStop(.4, 'rgba(160,255,170,.18)');
+  hgrad.addColorStop(1, 'rgba(160,255,170,0)');
+  hg.fillStyle = hgrad; hg.fillRect(0, 0, 128, 128);
+  moonHalo = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: new THREE.CanvasTexture(haloC), blending: THREE.AdditiveBlending,
+    transparent: true, depthWrite: false, fog: false, opacity: .5 }));
+  moonHalo.material.opacity = .32;
+  moonHalo.scale.set(20, 20, 1);
+  moonHalo.position.copy(moon.position);
+  scene3.add(moonHalo);
+
+  // two distant fires: flickering warm point lights + additive glow sprites
+  const glowC = document.createElement('canvas');
+  glowC.width = glowC.height = 64;
+  const gg = glowC.getContext('2d');
+  const ggrad = gg.createRadialGradient(32, 32, 2, 32, 32, 32);
+  ggrad.addColorStop(0, 'rgba(255,170,80,.9)');
+  ggrad.addColorStop(1, 'rgba(255,120,40,0)');
+  gg.fillStyle = ggrad; gg.fillRect(0, 0, 64, 64);
+  const glowTex = new THREE.CanvasTexture(glowC);
+  for (const [fx, fz] of [[-5.5, -16], [4.8, -34]]) {
+    const light = new THREE.PointLight(0xff7426, 2.2, 22, 2);
+    light.position.set(fx, .7, fz);
+    const glow = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex,
+      blending: THREE.AdditiveBlending, transparent: true, depthWrite: false, opacity: .6 }));
+    glow.scale.set(2.4, 2.4, 1);
+    glow.position.set(fx, .8, fz);
+    scene3.add(light, glow);
+    fires.push({ light, glow, seed: rand(0, 9) });
+  }
+
+  // the distant horde, revealed only while lightning hangs in the air
+  const silTex = makeSilhouetteTex();
+  for (let i = 0; i < 8; i++) {
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(1.1, 2.2),
+      new THREE.MeshBasicMaterial({ map: silTex, transparent: true, alphaTest: .15,
+                                    fog: false, opacity: 0 }));
+    m.position.set(rand(-7, 7), 1.1, -rand(34, 46));
+    m.visible = false;
+    hordeBoards.push(m);
+    scene3.add(m);
+  }
+
+  // post chain: render -> bloom (half res) -> grade -> output
+  composer = new EffectComposer(renderer);
+  composer.addPass(new RenderPass(scene3, camera));
+  bloomPass = new UnrealBloomPass(new THREE.Vector2(W / 2, H / 2), .45, .35, .85);
+  composer.addPass(bloomPass);
+  gradePass = new ShaderPass(GradeShader);
+  composer.addPass(gradePass);
+  composer.addPass(new OutputPass());
+}
+
+// fps watcher -> one-way degrade ladder; tracking is NEVER on this list
+const DEGRADE = [
+  () => { bloomPass.enabled = false; },                      // biggest single win
+  () => { gradePass.uniforms.uGrain.value = 0; },
+  () => { PARTICLE_K = .5; },
+  () => { renderer.setPixelRatio(1); composer.setSize(W, H); },
+  () => { MAXF = 5; },
+];
+function setDegrade(n) {
+  while (degradeStep < Math.min(n, DEGRADE.length)) DEGRADE[degradeStep++]();
+}
+let frames = 0, fpsT = performance.now();
+function perfGuard(now) {
+  frames++;
+  const span = now - fpsT;
+  if (span < 2000) return;
+  if (span > 4000) { frames = 0; fpsT = now; return; } // tab slept — that's not "slow"
+  __fps = frames * 1000 / span;
+  frames = 0; fpsT = now;
+  if (__fps < 26 && degradeStep < DEGRADE.length) DEGRADE[degradeStep++]();
+}
+document.addEventListener('visibilitychange', () => { frames = 0; fpsT = performance.now(); });
+
+let remoteIsBig = false; // versus watching: the partner's video owns the screen
+
+function render(now) {
+  const fdt = now - flashAt; // double-blink: pop, dip, pop, fade
+  flash = fdt < 70 ? .95 : fdt < 140 ? .35 : fdt < 240 ? .8
+        : Math.max(0, .8 - (fdt - 240) / 450 * .8);
+  dirLight.intensity = 1.1 + 3.2 * flash;
+  ambLight.intensity = 1.05 + 1.5 * flash;
+  scene3.fog.density = FOG_D * (1 - .4 * flash);
+  if (bloomPass.enabled) bloomPass.strength = .45 + .5 * flash;
+  gradePass.uniforms.uFlash.value = flash;
+  gradePass.uniforms.uTime.value = now * .001;
+  const sdt = now - scareT; // claw scare: fast in, slow out, 750ms total
+  gradePass.uniforms.uScare.value =
+    sdt < 120 ? sdt / 120 * .8 : Math.max(0, .8 - (sdt - 120) / 630 * .8);
+
+  const hv = now < hordeUntil;
+  for (const b of hordeBoards) {
+    b.visible = hv;
+    if (hv) b.material.opacity = Math.min(1, (hordeUntil - now) / 300) * .95;
+  }
+  windowGroups.forEach((m, i) => { // flicker + occasional blackout
+    const f = Math.sin(now / 640 + i * 2.1) * .5 + .5;
+    const v = f < .2 ? .04 : .2 + 1.3 * f;
+    m.color.setRGB(v, v * .54, v * .18);
+  });
+  for (const f of fires) {
+    f.light.intensity = 2.2 + Math.sin(now / 97 + f.seed) * .5
+                            + Math.sin(now / 31 + f.seed * 3) * .4;
+    f.glow.material.opacity = .35 + f.light.intensity * .1;
+  }
+
+  if (shakeAmp > 0) { // camera shake: kills, brute stomps, thunder
+    camera.position.set((Math.random() * 2 - 1) * shakeAmp * .012,
+                        1.6 + (Math.random() * 2 - 1) * shakeAmp * .012, 0);
+    camera.quaternion.copy(camBaseQ);
+    camera.rotateZ((Math.random() * 2 - 1) * shakeAmp * .0025);
+  } else {
+    camera.position.set(0, 1.6, 0);
+    camera.quaternion.copy(camBaseQ);
+  }
+
+  updateRibbons(now);
+  updateMarkers(now);
+
+  if (remoteIsBig) return; // fullscreen call video owns the GPU while watching
+  composer.render();
+}
+
+let last = performance.now();
+function loop(now) {
+  requestAnimationFrame(loop);
+  const dt = Math.min((now - last) / 1000, .05);
+  last = now;
+  if (running) { update(dt, now); projectEnemies(); detectHands(now); versusTick(now); }
+  render(now);
+  updatePill(now);
+  perfGuard(now);
+}
+document.addEventListener('visibilitychange', () => { last = performance.now(); });
+
+/* =====================================================================
+   ENEMIES IN 3D — they spawn deep in the fog and come for you.
+   Tier 1 (default): each enemy is a camera-facing board cut from its
+   sprites/ image, LIT by the scene (Lambert, not Sprite), with additive
+   glow planes pinned over the eyes the analyzer found. Tier 2: drop
+   rigged GLBs into models/ (see README) and they're used instead —
+   probed at boot, zero code changes. Hit-testing is screen-space, so
+   both tiers collide identically.
+   ===================================================================== */
+const ENEMY3D = { // world height (m), center height, forward speed (m/s)
+  shambler: { h: 1.9, y0: .95, speed: [.85, 1.25] },
+  crawler:  { h: .85, y0: .45, speed: [1.0, 1.5] },
+  ghoul:    { h: 1.7, y0: 1.55, speed: [.7, 1.0] },
+  bat:      { h: .9,  y0: 1.9, speed: [2.0, 2.8] },
+  brute:    { h: 2.7, y0: 1.35, speed: [.45, .65] },
+};
+const corpses = [];
+let scareT = -9e9, lastScare = 0, scareCount = 0;
+let fxAdd = null, fxSmoke = null;
+
+// ---------- two particle pools: additive ichor/sparks, soft dark smoke ----
+const softTex = (() => {
+  const c = document.createElement('canvas');
+  c.width = c.height = 64;
+  const g = c.getContext('2d');
+  const r = g.createRadialGradient(32, 32, 2, 32, 32, 30);
+  r.addColorStop(0, 'rgba(255,255,255,1)');
+  r.addColorStop(.6, 'rgba(255,255,255,.45)');
+  r.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = r;
+  g.fillRect(0, 0, 64, 64);
+  return new THREE.CanvasTexture(c);
+})();
+
+class FxPool {
+  constructor(cap, blending, accelY) {
+    this.cap = cap; this.n = 0; this.accelY = accelY;
+    this.px = new Float32Array(cap * 3);
+    this.pv = new Float32Array(cap * 3);
+    this.life = new Float32Array(cap);
+    this.age = new Float32Array(cap);
+    this.sz = new Float32Array(cap);
+    this.grow = new Float32Array(cap);
+    this.col = new Float32Array(cap * 3);
+    this.al = new Float32Array(cap);
+    this.geo = new THREE.BufferGeometry();
+    this.geo.setAttribute('position', new THREE.BufferAttribute(this.px, 3));
+    this.geo.setAttribute('aColor', new THREE.BufferAttribute(this.col, 3));
+    this.geo.setAttribute('aSize', new THREE.BufferAttribute(this.sz, 1));
+    this.geo.setAttribute('aAlpha', new THREE.BufferAttribute(this.al, 1));
+    const mat = new THREE.ShaderMaterial({
+      uniforms: { uTex: { value: softTex } },
+      transparent: true, depthWrite: false, blending,
+      vertexShader:
+        'attribute vec3 aColor; attribute float aSize; attribute float aAlpha;\n' +
+        'varying vec3 vC; varying float vA;\n' +
+        'void main(){ vC = aColor; vA = aAlpha;\n' +
+        '  vec4 mv = modelViewMatrix * vec4(position, 1.0);\n' +
+        '  gl_PointSize = aSize * (280.0 / -mv.z);\n' +
+        '  gl_Position = projectionMatrix * mv; }',
+      fragmentShader:
+        'uniform sampler2D uTex; varying vec3 vC; varying float vA;\n' +
+        'void main(){ gl_FragColor = texture2D(uTex, gl_PointCoord) * vec4(vC, vA); }',
+    });
+    this.points = new THREE.Points(this.geo, mat);
+    this.points.frustumCulled = false;
+    this.points.renderOrder = 100;
+    scene3.add(this.points);
+  }
+  spawn(x, y, z, vx, vy, vz, life, size, grow, r, g, b) {
+    if (this.n >= Math.floor(this.cap * PARTICLE_K)) return;
+    const i = this.n++;
+    this.px[i*3] = x; this.px[i*3+1] = y; this.px[i*3+2] = z;
+    this.pv[i*3] = vx; this.pv[i*3+1] = vy; this.pv[i*3+2] = vz;
+    this.life[i] = life; this.age[i] = 0;
+    this.sz[i] = size; this.grow[i] = grow;
+    this.col[i*3] = r; this.col[i*3+1] = g; this.col[i*3+2] = b;
+    this.al[i] = 1;
+  }
+  update(dt) {
+    for (let i = this.n - 1; i >= 0; i--) {
+      this.age[i] += dt;
+      if (this.age[i] >= this.life[i]) { // swap-remove the dead one
+        const l = --this.n;
+        if (i !== l) {
+          for (let k = 0; k < 3; k++) {
+            this.px[i*3+k] = this.px[l*3+k];
+            this.pv[i*3+k] = this.pv[l*3+k];
+            this.col[i*3+k] = this.col[l*3+k];
+          }
+          this.life[i] = this.life[l]; this.age[i] = this.age[l];
+          this.sz[i] = this.sz[l]; this.grow[i] = this.grow[l];
+          this.al[i] = this.al[l];
+        }
+        continue;
+      }
+      this.pv[i*3+1] += this.accelY * dt;
+      this.px[i*3] += this.pv[i*3] * dt;
+      this.px[i*3+1] += this.pv[i*3+1] * dt;
+      this.px[i*3+2] += this.pv[i*3+2] * dt;
+      this.sz[i] += this.grow[i] * dt;
+      this.al[i] = 1 - this.age[i] / this.life[i];
+    }
+    this.geo.attributes.position.needsUpdate = true;
+    this.geo.attributes.aColor.needsUpdate = true;
+    this.geo.attributes.aSize.needsUpdate = true;
+    this.geo.attributes.aAlpha.needsUpdate = true;
+    this.geo.setDrawRange(0, this.n);
+  }
+}
+function initFx() {
+  fxAdd = new FxPool(400, THREE.AdditiveBlending, -3);   // ichor falls
+  fxSmoke = new FxPool(160, THREE.NormalBlending, .35);  // smoke climbs
+}
+const ICHOR_RGB = ICHOR.map(h => [parseInt(h.slice(1, 3), 16) / 255,
+                                  parseInt(h.slice(3, 5), 16) / 255,
+                                  parseInt(h.slice(5, 7), 16) / 255]);
+
+function ichorBurst(e, k) {
+  if (!fxAdd) return;
+  const n = Math.round(18 * k + 6);
+  for (let i = 0; i < n; i++) {
+    const a = rand(0, Math.PI * 2), up = rand(-.3, 1.4), sp = rand(1.2, 3.4) * Math.min(k, 1.6);
+    const c = ICHOR_RGB[(Math.random() * ICHOR_RGB.length) | 0];
+    fxAdd.spawn(e.x, e.cy, e.z,
+                Math.cos(a) * sp, up * sp, Math.sin(a) * sp * .4,
+                rand(.35, .7), rand(.1, .22) * Math.min(k, 1.5), 0,
+                c[0] * 1.6, c[1] * 1.6, c[2] * 1.6); // >1 greens catch the bloom
+  }
+}
+function smokeBurst(x, y, z, n) {
+  if (!fxSmoke) return;
+  for (let i = 0; i < n; i++)
+    fxSmoke.spawn(x + rand(-.3, .3), y + rand(-.2, .4), z + rand(-.2, .2),
+                  rand(-.25, .25), rand(.2, .6), rand(-.25, .25),
+                  rand(.7, 1.2), rand(.25, .5), rand(.5, .9),
+                  .16, .22, .16);
+}
+
+// ---------- the flying +1 / +5 (pooled DOM, military font) ----------
+const ptexts = [];
+function ptext(txt, x, y) {
+  let p = ptexts.find(q => !q.busy);
+  if (!p) {
+    if (ptexts.length >= 8) return;
+    p = { el: document.createElement('div') };
+    p.el.className = 'ptext';
+    $('fx3d').appendChild(p.el);
+    ptexts.push(p);
+  }
+  p.busy = true;
+  p.el.textContent = txt;
+  p.el.style.left = x + 'px';
+  p.el.style.top = y + 'px';
+  p.el.classList.remove('go');
+  void p.el.offsetWidth; // restart the CSS animation
+  p.el.classList.add('go');
+  setTimeout(() => { p.busy = false; }, 950);
+}
+
+// ---------- looks: billboard textures + optional GLB models ----------
+const bbGeo = new THREE.PlaneGeometry(1, 1);
+const eyeTex = new THREE.CanvasTexture(eyeGlowSpr);
+const blobTex = (() => {
+  const c = document.createElement('canvas');
+  c.width = c.height = 64;
+  const g = c.getContext('2d');
+  const r = g.createRadialGradient(32, 32, 4, 32, 32, 31);
+  r.addColorStop(0, 'rgba(0,0,0,.7)');
+  r.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = r;
+  g.fillRect(0, 0, 64, 64);
+  return new THREE.CanvasTexture(c);
+})();
+
+const bbCache = {};
+let silFallback = null;
+function billboardTexFor(kid) {
+  if (bbCache[kid]) return bbCache[kid];
+  const ph = photos[kid];
+  if (ph) { // crop the analyzed bbox so the board is ALL creature
+    const c = document.createElement('canvas');
+    const s = Math.min(1, 512 / Math.max(ph.sw, ph.sh));
+    c.width = Math.max(1, Math.round(ph.sw * s));
+    c.height = Math.max(1, Math.round(ph.sh * s));
+    c.getContext('2d').drawImage(ph.img, ph.sx, ph.sy, ph.sw, ph.sh, 0, 0, c.width, c.height);
+    const tex = new THREE.CanvasTexture(c);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    bbCache[kid] = { tex, aspect: ph.aspect, eyes: ph.eyes }; // memoize real art only
+    return bbCache[kid];
+  }
+  // rule 1 fallback: a gaunt dark fog-silhouette, never cartoon art. NOT
+  // cached per kind — the moment the sprite finishes analyzing, new spawns
+  // get the real board.
+  if (!silFallback) {
+    const tex = makeSilhouetteTex();
+    tex.colorSpace = THREE.SRGBColorSpace;
+    silFallback = { tex, aspect: .5, eyes: [[.42, .2], [.58, .2]] };
+  }
+  return silFallback;
+}
+
+// tier 2: probe models/<kind>.glb once at boot; missing files = billboards
+const glbs = {};
+const GLB_FILES = { shambler: 'models/zombie.glb', crawler: 'models/crawler.glb',
+                    ghoul: 'models/ghoul.glb', bat: 'models/bat.glb',
+                    brute: 'models/brute.glb' };
+(async () => {
+  const loader = new GLTFLoader();
+  for (const [kid, file] of Object.entries(GLB_FILES)) {
+    try {
+      const head = await fetch(file, { method: 'HEAD' });
+      if (!head.ok) continue;
+      const gltf = await loader.loadAsync(file);
+      const box = new THREE.Box3().setFromObject(gltf.scene);
+      const size = new THREE.Vector3();
+      box.getSize(size);
+      gltf.userData = { rawH: Math.max(size.y, .01), rawMinY: box.min.y };
+      gltf.scene.traverse(o => { if (o.material) o.material.fog = true; });
+      glbs[kid] = gltf;
+    } catch (e) { /* billboard fallback */ }
+  }
+})();
+
+function dressEnemy(e) {
+  const kid = e.kind.id, P = ENEMY3D[kid];
+  const tpl = glbs[kid];
+  if (tpl) {
+    e.mesh = SkeletonUtils.clone(tpl.scene);
+    const k = P.h / tpl.userData.rawH;
+    e.mesh.scale.setScalar(k);
+    e.glb = true;
+    e.meshYOff = -tpl.userData.rawMinY * k - P.y0; // feet on the ground
+    const clips = tpl.animations || [];
+    const clip = clips.find(c => /walk|run|crawl|fly|zombie/i.test(c.name)) || clips[0];
+    if (clip) {
+      e.mixer = new THREE.AnimationMixer(e.mesh);
+      e.mixer.clipAction(clip).play();
+    }
+    // models get the same fog-piercing eyes as billboards — two additive
+    // glow sprites pinned at head height (heuristic: faces aren't mapped)
+    e.eyeMat = new THREE.SpriteMaterial({ map: eyeTex, transparent: true,
+      blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
+      color: new THREE.Color(.7, 2.1, .5) });
+    const rawH = tpl.userData.rawH, headY = tpl.userData.rawMinY + rawH * .92;
+    for (const sx of [-1, 1]) {
+      const s = new THREE.Sprite(e.eyeMat);
+      s.position.set(sx * rawH * .032, headY, rawH * .05);
+      s.scale.setScalar(rawH * .09);
+      e.mesh.add(s);
+    }
+    e.worldR = P.h * .4;
+  } else {
+    const bt = billboardTexFor(kid);
+    const w = Math.min(P.h * bt.aspect, P.h * 2.6);
+    const mat = new THREE.MeshLambertMaterial({ map: bt.tex, alphaTest: .25,
+                                                side: THREE.DoubleSide });
+    e.mesh = new THREE.Mesh(bbGeo, mat);
+    e.mesh.scale.set(w, P.h, 1);
+    e.meshYOff = 0;
+    e.eyeMat = new THREE.MeshBasicMaterial({ map: eyeTex, transparent: true,
+      blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
+      color: new THREE.Color(.7, 2.1, .5) }); // >1 green: the eyes bloom in the fog
+    const es = .16 * P.h;
+    for (const [nx, ny] of bt.eyes) {
+      const g = new THREE.Mesh(bbGeo, e.eyeMat);
+      g.position.set(nx - .5, .5 - ny, .02);
+      g.scale.set(es / w, es / P.h, 1); // undo the parent stretch: stay circular
+      e.mesh.add(g);
+    }
+    e.worldR = Math.min(w, P.h) / 2;
+  }
+  e.mesh.renderOrder = 10;
+  scene3.add(e.mesh);
+  e.blob = new THREE.Mesh(bbGeo, new THREE.MeshBasicMaterial({ map: blobTex,
+    transparent: true, depthWrite: false, opacity: .5 }));
+  e.blob.rotation.x = -Math.PI / 2;
+  e.blob.renderOrder = 1;
+  scene3.add(e.blob);
+}
+
+function spawn() {
+  const now = performance.now();
+  const kind = pickKind(now);
+  if (kind.id === 'brute') lastBrute = now;
+  const P = ENEMY3D[kind.id];
+  const e = { kind, hp: kind.hp, t: 0, phase: rand(0, 6.28), flash: 0, kick: 0,
+              x: rand(-5.5, 5.5), z: -rand(28, 36), xAim: rand(-1.6, 1.6),
+              spd: rand(P.speed[0], P.speed[1]) * speedMul,
+              baseY: P.y0, cy: P.y0, gaitY: 0, roll: 0, stomp: 0,
+              sx: -999, sy: -999, sr: 0, hittable: false };
+  dressEnemy(e);
+  enemies.push(e);
+  // each kind announces itself from the dark (groans throttled — spawns are constant)
+  if (kind.id === 'bat') playScreech();
+  else if (kind.id === 'brute') playRoar(false);
+  else if (kind.id === 'ghoul') playWhisper();
+  else if (Math.random() < .7) playGroan();
+}
+
+// irregular, broken movement — nothing bounces, everything lurches
+function updateEnemies(dt, now) {
+  for (let i = enemies.length - 1; i >= 0; i--) {
+    const e = enemies[i];
+    e.t += dt;
+    if (e.flash > 0) e.flash -= dt * 3;
+    const k = e.kind.id, P = ENEMY3D[k];
+    if (!e.pin) {
+      if (e.kick) { e.x += e.kick * dt * 2.5; e.kick *= Math.pow(.02, dt); } // stagger shove
+      let fwd = e.spd;
+      if (k === 'shambler') {       // stop-start lurch with a hitch
+        fwd *= Math.pow(Math.max(0, Math.sin(e.t * 2.6 + e.phase)), 1.5) * 1.9;
+        e.roll = Math.sin(e.t * 2.2 + e.phase) * .06 + Math.sin(e.t * 7.3 + e.phase) * .015;
+        e.gaitY = Math.abs(Math.sin(e.t * 2.6 + e.phase)) * .05;
+      } else if (k === 'crawler') { // dragging pulses
+        fwd *= (.25 + .75 * Math.max(0, Math.sin(e.t * 3.2 + e.phase))) * 1.45;
+        e.roll = Math.sin(e.t * 3.2 + e.phase) * .04;
+        e.gaitY = Math.sin(e.t * 3.2 + e.phase) * .02;
+      } else if (k === 'ghoul') {   // dead-quiet drift and weave
+        e.x += Math.sin(e.t * .9 + e.phase) * 1.1 * dt;
+        e.gaitY = Math.sin(e.t * 1.3 + e.phase) * .25;
+        e.roll = Math.sin(e.t * .9 + e.phase) * .1;
+      } else if (k === 'bat') {     // fast swooping arcs
+        e.x += Math.cos(e.t * 1.6 + e.phase) * 1.8 * dt;
+        e.gaitY = Math.sin(e.t * 2.1 + e.phase) * .7;
+        e.roll = Math.cos(e.t * 2.1 + e.phase) * .3;
+      } else {                      // brute: slow stomps that shake the camera
+        const ph0 = e.stomp;
+        e.stomp += dt / .9;
+        fwd *= .35 + .65 * Math.max(0, Math.sin(e.stomp * Math.PI * 2));
+        if ((ph0 % 1) > (e.stomp % 1)) { // a foot just landed
+          const dist = Math.max(2, -e.z);
+          addShake(7 * Math.min(1, 9 / dist));
+          tone(52, 30, .18, 'sine', Math.min(.5, 4 / dist));
+          noiseBurst(.12, 'lowpass', 120, 1, Math.min(.35, 3 / dist), 0);
+        }
+        e.roll = Math.sin(e.stomp * Math.PI * 2) * .05;
+        e.gaitY = Math.abs(Math.sin(e.stomp * Math.PI * 2)) * .08;
+      }
+      e.z += fwd * dt;
+      e.x += (e.xAim - e.x) * .12 * dt; // drift into the player's lane
+      if (e.z > -1.3) { clawScare(i); continue; } // reached you — scare, no harm
+    }
+    e.cy = e.baseY + e.gaitY;
+    if (e.mixer) e.mixer.update(dt * (0.6 + 0.8 * Math.min(1, e.spd)));
+    // face the camera (boards yaw-only) or the walk direction (models:
+    // Mixamo rigs face +Z, and they advance toward +z — yaw 0 plus a small
+    // steer toward the lane they're drifting into)
+    const yaw = e.glb ? Math.atan2((e.xAim - e.x) * .25, 1)
+                      : Math.atan2(camera.position.x - e.x,
+                                   camera.position.z - e.z);
+    e.mesh.position.set(e.x, e.cy + e.meshYOff, e.z);
+    e.mesh.rotation.set(0, yaw, e.roll);
+    if (e.eyeMat)
+      e.eyeMat.opacity = (.5 + .3 * Math.sin(now / 170 + e.phase)) *
+        Math.max(.25, Math.min(1, 1 - (-e.z - 20) / 12));
+    if (e.flash > 0 && e.mesh.material) { // brute stagger: white-hot emissive pulse
+      e.mesh.material.emissive.setScalar(e.flash * .9);
+    } else if (e.mesh.material && e.mesh.material.emissive) {
+      e.mesh.material.emissive.setScalar(0);
+    }
+    e.blob.position.set(e.x, .02, e.z);
+    const alt = Math.max(0, e.cy - P.y0 * .5);
+    const bs = Math.max(.4, e.worldR * 2 * Math.max(.35, 1.2 / (1 + alt)));
+    e.blob.scale.set(bs, bs * .6, 1);
+    e.blob.material.opacity = .5 * Math.max(.3, 1.2 / (1 + alt)) ;
+  }
+}
+
+// crumple + dissolve: the body folds, sinks and fades into smoke
+function beginCrumple(e) {
+  e.mesh.children.forEach(c => { c.visible = false; });
+  const mats = [];
+  e.mesh.traverse(o => { if (o.material) { o.material.transparent = true; mats.push(o.material); } });
+  corpses.push({ mesh: e.mesh, blob: e.blob, mats, t: 0,
+                 sx: e.mesh.scale.x, sy: e.mesh.scale.y,
+                 side: Math.random() < .5 ? -1 : 1, y0: e.mesh.position.y });
+  smokeBurst(e.x, e.cy, e.z, 8);
+}
+function updateCorpses(dt) {
+  for (let i = corpses.length - 1; i >= 0; i--) {
+    const c = corpses[i];
+    c.t += dt;
+    const k = Math.min(1, c.t / .38);
+    c.mesh.scale.y = c.sy * Math.max(.1, 1 - k * .9);
+    c.mesh.rotation.z = c.side * k * .55;
+    c.mesh.position.y = c.y0 * (1 - k * .7) + .12;
+    const fade = k < .55 ? 1 : 1 - (k - .55) / .45;
+    for (const m of c.mats) m.opacity = fade;
+    c.blob.material.opacity = .5 * fade;
+    if (k >= 1) {
+      scene3.remove(c.mesh, c.blob);
+      for (const m of c.mats) m.dispose();
+      c.blob.material.dispose();
+      corpses.splice(i, 1);
+    }
+  }
+}
+function despawnEnemy(i, smoke) {
+  const e = enemies[i];
+  enemies.splice(i, 1);
+  if (smoke) smokeBurst(e.x, e.cy, e.z, 10);
+  scene3.remove(e.mesh, e.blob);
+  e.mesh.traverse(o => { if (o.material && o.material.dispose) o.material.dispose(); });
+  e.blob.material.dispose();
+}
+
+// it reached you: shake, claw streaks, a roar — and the night moves on.
+// One global cooldown so a pack arriving together doesn't strobe the screen.
+function clawScare(i) {
+  despawnEnemy(i, true);
+  const now = performance.now();
+  if (now - lastScare < 1500) return;
+  lastScare = now;
+  scareCount++;
+  scareT = now;
+  addShake(13);
+  const sc = $('scare');
+  sc.classList.add('show');
+  setTimeout(() => sc.classList.remove('show'), 700);
+  playRoar(false);
+  playClaw();
+}
+
+// ---------- screen-space projection: feeds the untouched trail collision ----
+const _pv = new THREE.Vector3();
+function projectEnemies() {
+  const projK = H / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2));
+  for (const e of enemies) {
+    _pv.set(e.x, e.cy, e.z).project(camera);
+    const behind = _pv.z > 1 || _pv.z < -1;
+    e.sx = (_pv.x * .5 + .5) * W;
+    e.sy = (-_pv.y * .5 + .5) * H;
+    const dist = Math.hypot(e.x - camera.position.x, e.cy - camera.position.y,
+                            e.z - camera.position.z);
+    e.sr = Math.max((e.worldR * projK) / Math.max(dist, .5), 26); // 26px floor: deep
+    e.hittable = !behind && e.z > -22 &&                          // targets stay fair
+                 e.sx > -60 && e.sx < W + 60 && e.sy > -60 && e.sy < H + 60;
+  }
+}
+
+function slashEnemy(i, ang) {
+  const e = enemies[i], now = performance.now();
+  // a short shield after every brute hit, so one fast swipe (= many trail
+  // segments) can't chain 3 hits — including the killing blow — at once
+  if (now < (e.iv || 0)) return;
+
+  if (e.hp > 1) {
+    e.hp--;
+    e.iv = now + 420;
+    e.flash = .3;                          // white-hot stagger flash
+    e.kick = Math.cos(ang) * 1.7;          // shoved along the cut, in world x
+    addShake(4);
+    ichorBurst(e, .5);
+    playGrunt();
+    return;
+  }
+
+  enemies.splice(i, 1);
+  kills++;
+  score += e.kind.pts;
+  const el = $('score');
+  el.textContent = score;
+  el.classList.add('bump');
+  setTimeout(() => el.classList.remove('bump'), 130);
+
+  comboN = (now - comboT < 1000) ? comboN + 1 : 0;
+  comboT = now;
+  if (comboN >= 1) showCombo(comboN + 1);
+  playPop(Math.pow(1.07, Math.min(comboN, 8)));
+
+  const isBrute = e.kind.id === 'brute';
+  ichorBurst(e, isBrute ? 1.8 : 1);
+  ptext('+' + e.kind.pts, e.sx, e.sy);
+  addShake(isBrute ? 9 : 2.5);
+  beginCrumple(e); // the corpse entry now owns the mesh + blob fade-out
+  if (isBrute) {
+    bannerShow('BRUTE DOWN  +5', 1500);
+    ichorBurst({ x: e.x, cy: e.cy, z: e.z }, 2.2);
+    playRoar(true);
+  }
+  if (kills % 25 === 0 && !versus) celebrate();
+  onScoreChange(e.kind.pts);
+}
+
+/* =====================================================================
+   THE SLASH — a glowing ribbon of light drawn through the night.
+   Trail points (screen space, the same ones collision uses) are
+   unprojected onto a plane 2.2m in front of the camera and built into
+   a tapered triangle strip with additive vertex colors: toxic green at
+   the tail, hotter than 1.0 at the head so the bloom pass ignites it.
+   ===================================================================== */
+const RIBBON_DIST = 2.2, RIBBON_MAX = 40;
+const ribbons = [];
+const _ua = new THREE.Vector3(), _ub = new THREE.Vector3(), _uc = new THREE.Vector3(),
+      _us = new THREE.Vector3(), _ufwd = new THREE.Vector3();
+
+// screen pixels -> a world point at fixed forward depth from the camera
+function unprojectAt(px, py, out) {
+  out.set((px / W) * 2 - 1, -(py / H) * 2 + 1, .5)
+     .unproject(camera)
+     .sub(camera.position)
+     .normalize();
+  return out.multiplyScalar(RIBBON_DIST / Math.max(.05, -out.z))
+            .add(camera.position);
+}
+
+function makeRibbon() {
+  const pos = new Float32Array(RIBBON_MAX * 2 * 3);
+  const col = new Float32Array(RIBBON_MAX * 2 * 3);
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  const idx = [];
+  for (let i = 0; i < RIBBON_MAX - 1; i++)
+    idx.push(i * 2, i * 2 + 1, i * 2 + 2, i * 2 + 1, i * 2 + 3, i * 2 + 2);
+  geo.setIndex(idx);
+  const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+    vertexColors: true, blending: THREE.AdditiveBlending, transparent: true,
+    depthWrite: false, depthTest: false, side: THREE.DoubleSide }));
+  mesh.frustumCulled = false;
+  mesh.renderOrder = 990; // over everything: it's light, not an object
+  scene3.add(mesh);
+  return { mesh, geo, pos, col, key: null };
+}
+
+function updateRibbons(now) {
+  for (const r of ribbons)
+    if (r.key && !trails.has(r.key)) { r.key = null; r.mesh.visible = false; }
+  for (const [key, tr] of trails) {
+    tr.pts = tr.pts.filter(p => now - p.t < TRAIL_MS);
+    if (!tr.pts.length) { trails.delete(key); continue; }
+    let r = ribbons.find(q => q.key === key);
+    if (!r) {
+      r = ribbons.find(q => !q.key);
+      if (!r && ribbons.length < 4) { r = makeRibbon(); ribbons.push(r); }
+      if (!r) continue;
+      r.key = key;
+    }
+    const n = tr.pts.length;
+    if (n < 2) { r.mesh.visible = false; continue; }
+    r.mesh.visible = true;
+    camera.getWorldDirection(_ufwd);
+    for (let i = 0; i < n; i++) {
+      const p = tr.pts[i];
+      unprojectAt(p.x, p.y, _ua);
+      const pn = tr.pts[Math.min(n - 1, i + 1)], pp = tr.pts[Math.max(0, i - 1)];
+      unprojectAt(pn.x, pn.y, _ub);
+      unprojectAt(pp.x, pp.y, _uc);
+      _ub.sub(_uc);
+      if (_ub.lengthSq() < 1e-8) _ub.set(0, 1, 0);
+      _us.crossVectors(_ub.normalize(), _ufwd).normalize(); // side, in view plane
+      const age = Math.min(1, (now - p.t) / TRAIL_MS);      // 0 = newest
+      const head = i / (n - 1);                             // 1 at the leading edge
+      const wHalf = .012 + .055 * (1 - age) * (.25 + .75 * head);
+      const o = i * 6;
+      r.pos[o]     = _ua.x + _us.x * wHalf;
+      r.pos[o + 1] = _ua.y + _us.y * wHalf;
+      r.pos[o + 2] = _ua.z + _us.z * wHalf;
+      r.pos[o + 3] = _ua.x - _us.x * wHalf;
+      r.pos[o + 4] = _ua.y - _us.y * wHalf;
+      r.pos[o + 5] = _ua.z - _us.z * wHalf;
+      const heat = (1 - age) * (.35 + .65 * head);
+      const cr = .3 + 1.9 * heat, cg = .85 + 1.75 * heat, cb = .25 + 1.55 * heat;
+      r.col[o] = cr; r.col[o + 1] = cg; r.col[o + 2] = cb;
+      r.col[o + 3] = cr; r.col[o + 4] = cg; r.col[o + 5] = cb;
+    }
+    r.geo.attributes.position.needsUpdate = true;
+    r.geo.attributes.color.needsUpdate = true;
+    r.geo.setDrawRange(0, (n - 1) * 6);
+  }
+}
+
+// glowing fingertip markers — the player instantly sees "that dot is my
+// hand", even when it's holding still and there's no trail to look at
+const markerSprites = [];
+function updateMarkers(now) {
+  let mi = 0;
+  for (const [key, s] of handSmooth) {
+    let m = markerSprites[mi];
+    if (!m) {
+      m = new THREE.Sprite(new THREE.SpriteMaterial({ map: eyeTex,
+        blending: THREE.AdditiveBlending, transparent: true, depthWrite: false,
+        color: new THREE.Color(.8, 2.2, .6) }));
+      m.renderOrder = 995;
+      scene3.add(m);
+      markerSprites.push(m);
+    }
+    m.visible = true;
+    unprojectAt(s.x, s.y, _ua);
+    m.position.copy(_ua);
+    const pul = .15 + .025 * Math.sin(now / 140);
+    m.scale.set(pul, pul, 1);
+    mi++;
+  }
+  for (; mi < markerSprites.length; mi++) markerSprites[mi].visible = false;
+}
+
+// ---------- touch & mouse input (always on — works alongside hands) ----------
+canvas.addEventListener('pointerdown', e => {
+  initAudio();
+  addTrailPoint('p' + e.pointerId, e.clientX, e.clientY);
+});
+canvas.addEventListener('pointermove', e => {
+  // touches only report moves while touching; mouse slices just by moving
+  addTrailPoint('p' + e.pointerId, e.clientX, e.clientY);
+});
+// block iOS double-tap zoom / long-press magnifier
+canvas.addEventListener('touchstart', e => e.preventDefault(), { passive: false });
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+// ---------- chip = friendly status message ----------
+let chipTimer = 0;
+function showChip(msg, ms) {
+  const c = $('chip');
+  c.textContent = msg;
+  c.style.opacity = 1;
+  clearTimeout(chipTimer);
+  chipTimer = setTimeout(() => c.style.opacity = 0, ms || 3000);
+}
+
+/* =====================================================================
+   CAMERA + HAND TRACKING (engine-identical port from the 2D game)
+
+   The game never waits for any of this: it is already playable by touch.
+   Ladder of fallbacks, a clear message at each rung:
+     camera denied/missing   -> play on, touch slashes
+     MediaPipe fails to load -> play on, self-view stays, touch slashes
+     tracking too slow       -> switches itself off, touch slashes
+   The camera is no longer a background — it tracks from the corner
+   self-view (tap to tuck it away; it keeps tracking either way).
+   ===================================================================== */
+const VISION_CDN = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs';
+const WASM_CDN   = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm';
+const MODEL_URL  = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
+
+let camOn = false, handsOK = false, landmarker = null, handsStatus = 'off';
+
+async function startCamera() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    showChip('CAMERA NEEDS A SECURE (HTTPS) PAGE — TOUCH TO SLASH', 6000);
+    return false;
+  }
+  try {
+    // 640x480 is plenty for hand tracking and easy on a mid-tier iPad GPU.
+    // The mic is asked for too, so a video call can carry voice — declining
+    // it (or having none) quietly falls back to camera-only.
+    const vc = { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } };
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: vc,
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+    } catch (e1) {
+      stream = await navigator.mediaDevices.getUserMedia({ video: vc, audio: false });
+    }
+    cam.srcObject = stream;
+    try { await cam.play(); } catch (e) {} // muted+playsinline video autoplays anyway
+    cam.style.display = 'block';
+    camOn = true;
+    initAudio(); // iOS can flip the AudioContext to 'interrupted' when the camera attaches
+    return true;
+  } catch (err) {
+    showChip(err && (err.name === 'NotAllowedError' || err.name === 'SecurityError')
+      ? 'CAMERA OFF — SWIPE TO SLASH'
+      : 'NO CAMERA FOUND — TOUCH TO SLASH', 6000);
+    return false;
+  }
+}
+
+// tap the self-view to tuck it away (tracking keeps running either way);
+// during a video call the tap belongs to the PiP swap logic instead
+cam.addEventListener('click', () => {
+  if (!call) cam.classList.toggle('self-hidden');
+});
+
+const withTimeout = (p, ms) =>
+  Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]);
+
+let visionMod = null, visionFiles = null, currentDelegate = '', loadRetried = false;
+
+function makeLandmarker(delegate) {
+  return withTimeout(visionMod.HandLandmarker.createFromOptions(visionFiles, {
+    baseOptions: { modelAssetPath: MODEL_URL, delegate },
+    runningMode: 'VIDEO',
+    numHands: 2, // two hands = two blades (or one hand each for two kids)
+  }), 25000);
+}
+
+async function startHands() {
+  handsStatus = 'loading';
+  showChip('LOADING HAND TRACKING — TOUCH WORKS MEANWHILE', 30000);
+  try {
+    if (!visionMod) visionMod = await withTimeout(import(VISION_CDN), 20000);
+    if (!visionFiles) visionFiles = await withTimeout(visionMod.FilesetResolver.forVisionTasks(WASM_CDN), 20000);
+    for (const delegate of ['GPU', 'CPU']) { // try the fast path first, then plain wasm
+      try { landmarker = await makeLandmarker(delegate); currentDelegate = delegate; break; }
+      catch (e) { landmarker = null; }
+    }
+    if (!landmarker) throw new Error('no delegate worked');
+    handsOK = true; handsStatus = 'on';
+    detFails = 0;
+    lastHandSeen = performance.now(); // start the "show your hand" clock now
+    showChip('TRACKING ACTIVE — WAVE TO SLASH', 4000);
+  } catch (e) {
+    if (!loadRetried) { // flaky wifi on first visit: one more attempt in 5s
+      loadRetried = true;
+      showChip('TRACKING SLOW TO LOAD — RETRYING. TOUCH WORKS MEANWHILE', 6000);
+      setTimeout(startHands, 5000);
+    } else {
+      handsStatus = 'failed';
+      showChip('TRACKING UNAVAILABLE — TOUCH MODE', 5000);
+    }
+  }
+}
+function disableHands(msg) { handsOK = false; handsStatus = 'failed'; showChip(msg, 5000); }
+
+// If the GPU path misbehaves at runtime, rebuild the tracker on plain CPU
+// wasm once before giving up — slower, but far more compatible.
+let rebuilding = false;
+async function rebuildOnCPU(reason) {
+  if (rebuilding) return;
+  rebuilding = true;
+  handsOK = false; handsStatus = 'loading';
+  showChip(reason + ' — SWITCHING TO COMPATIBLE MODE', 5000);
+  try {
+    try { if (landmarker && landmarker.close) landmarker.close(); } catch (e) {}
+    landmarker = await makeLandmarker('CPU');
+    currentDelegate = 'CPU';
+    detFails = 0; detTimes = []; detEvery = 100; // CPU is slower; pace gently
+    handsOK = true; handsStatus = 'on';
+    lastHandSeen = performance.now();
+    showChip('TRACKING RESTORED', 3500);
+  } catch (e) {
+    disableHands('TRACKING UNAVAILABLE — TOUCH MODE');
+  }
+  rebuilding = false;
+}
+
+// The camera frame and the screen rarely share an aspect ratio. The video is
+// drawn with CSS object-fit:cover (fill the screen, crop the overflow), so we
+// reproduce that math to map a normalized landmark (0..1 in the camera frame)
+// onto screen pixels. X is also flipped because the video is mirrored.
+function videoToScreen(nx, ny) {
+  const vw = cam.videoWidth || 640, vh = cam.videoHeight || 480;
+  const s = Math.max(W / vw, H / vh);
+  const dw = vw * s, dh = vh * s, ox = (W - dw) / 2, oy = (H - dh) / 2;
+  return { x: (1 - nx) * dw + ox, y: ny * dh + oy };
+}
+
+// Detection runs at ~15Hz (not every frame) to keep iPads at full speed; the
+// blade glides toward the newest fingertip position every frame, so trails
+// stay silky even between detections. If detection is slow we first halve
+// its rate, and only then give up and switch to touch.
+let detEvery = 66, lastDet = 0, detTimes = [], handTargets = [];
+let detFails = 0, lastHandSeen = 0;
+const handSmooth = new Map();
+let fedFrames = []; // test inlet: synthetic detection results ride the real pipeline
+
+function detectHands(now) {
+  if (!handsOK || rebuilding) return;
+  // while watching the other player's versus turn there's nothing to slice —
+  // skip detection and give the CPU to the live video instead
+  if (versus && !versus.playing && !versus.counting) return;
+  if (!fedFrames.length && cam.readyState < 2) return;
+  if (now - lastDet >= detEvery) {
+    lastDet = now;
+    let res;
+    if (fedFrames.length) {
+      res = fedFrames.shift(); // same mapping/smoothing/collision path as real frames
+    } else {
+      const t0 = performance.now();
+      try { res = landmarker.detectForVideo(cam, now); detFails = 0; }
+      catch (e) {
+        // one bad frame must not kill tracking: skip, retry, rebuild, only then give up
+        detFails++;
+        if (detFails < 3) return;
+        if (currentDelegate === 'GPU') rebuildOnCPU('TRACKING HICCUP');
+        else disableHands('TRACKING HICCUP — TOUCH MODE');
+        return;
+      }
+      detTimes.push(performance.now() - t0);
+      if (detTimes.length >= 30) {
+        const avg = detTimes.reduce((a, b) => a + b, 0) / detTimes.length;
+        detTimes = [];
+        if (avg > 140) {
+          if (currentDelegate === 'GPU') rebuildOnCPU('TRACKING SLOW HERE');
+          else disableHands('THIS DEVICE PREFERS TOUCH');
+          return;
+        }
+        if (avg > 70) detEvery = 120;
+      }
+    }
+    const used = {};
+    handTargets = (res.landmarks || []).map((lms, i) => {
+      // landmark 8 = tip of the index finger
+      const p = videoToScreen(lms[8].x, lms[8].y);
+      let key = res.handednesses && res.handednesses[i] && res.handednesses[i][0]
+        ? res.handednesses[i][0].categoryName : 'H' + i;
+      if (used[key]) key += i; // two kids can both show a "Right" hand
+      used[key] = 1;
+      return { key: 'hand' + key, x: p.x, y: p.y };
+    });
+    if (handTargets.length) lastHandSeen = now; // feeds the status pill
+  }
+  for (const t of handTargets) {
+    let s = handSmooth.get(t.key);
+    if (!s) { s = { x: t.x, y: t.y }; handSmooth.set(t.key, s); }
+    s.x += (t.x - s.x) * .45;
+    s.y += (t.y - s.y) * .45;
+    s.seen = now;
+    addTrailPoint(t.key, s.x, s.y);
+  }
+  for (const [k, s] of handSmooth) if (now - s.seen > 400) handSmooth.delete(k);
+}
+
+// ---------- live status pill + "I can't see your hand" hint ----------
+// Three states while the camera is on: green (hand in view right now),
+// yellow (tracking fine, hand out of view), gray (tracking off → touch).
+// This is the single biggest fix for "it feels broken": the game now SAYS
+// whether it can see a hand instead of leaving everyone guessing.
+let pillState = '', hintAt = 0;
+function updatePill(now) {
+  const pill = $('pill');
+  if (!running || !camOn || (versus && !versus.playing && !versus.counting)) {
+    if (pillState) { pillState = ''; pill.className = 'hidden'; }
+    return; // hidden off-camera and while watching the other player's turn
+  }
+  let cls, txt;
+  if (handsStatus === 'loading') { cls = 'p-gray'; txt = 'TRACKING LOADING'; }
+  else if (handsStatus !== 'on') { cls = 'p-gray'; txt = 'TOUCH MODE'; }
+  else if (now - lastHandSeen < 1000) { cls = 'p-green'; txt = 'TRACKING ACTIVE'; }
+  else { cls = 'p-yellow'; txt = 'SHOW YOUR HAND'; }
+  if (cls + txt !== pillState) {
+    pillState = cls + txt;
+    pill.className = cls;
+    pill.textContent = txt;
+  }
+  // long spell with no hand in frame → say what to actually do about it
+  if (handsStatus === 'on' && now - lastHandSeen > 10000 && now - hintAt > 20000) {
+    hintAt = now;
+    const h = $('hint');
+    h.textContent = 'STEP BACK SO THE CAMERA SEES YOUR HAND';
+    h.classList.add('show');
+    setTimeout(() => h.classList.remove('show'), 4500);
+  }
+}
+
+// ---------- start ----------
+// slow heartbeat under the title screen: it can only begin once the player
+// touches the page (autoplay rules) and stops the moment the hunt starts
+let heartT = 0;
+function startHeartbeat() {
+  if (heartT || running) return;
+  const thump = () => { tone(60, 38, .14, 'sine', .5); tone(52, 36, .12, 'sine', .34, .22); };
+  thump();
+  heartT = setInterval(thump, 1150);
+}
+function stopHeartbeat() { clearInterval(heartT); heartT = 0; }
+$('start').addEventListener('pointerdown', () => { initAudio(); startHeartbeat(); });
+
+function startGame() {
+  if (running) return;
+  stopHeartbeat();
+  $('start').classList.add('hidden');
+  $('gear').style.display = 'block';
+  running = true;
+  nextSpawn = performance.now() + 1500; // the first thing crawls out shortly
+  showChip('SLASH WHAT COMES OUT OF THE FOG', 2500);
+  try { navigator.wakeLock && navigator.wakeLock.request('screen').catch(() => {}); } catch (e) {}
+}
+$('btnTouch').addEventListener('click', () => { initAudio(); startGame(); });
+$('btnCam').addEventListener('click', async () => {
+  initAudio();
+  startGame(); // playable immediately — camera and tracking attach when ready
+  if (await startCamera()) startHands();
+});
+
+/* =====================================================================
+   OPTIONAL: HUNT TOGETHER — live scoreboard (engine-identical port)
+
+   Both devices type the same room code and see each other's name and
+   score. It rides on free public MQTT relays over secure WebSockets:
+   no account, no server, no API keys. Only what you see below is ever
+   sent: room code, a nickname, and the score. Use nicknames, and pick
+   a unique room code (strangers on the same code would see it).
+
+   The single-player game NEVER depends on this. The mqtt library is
+   only fetched when someone taps Join, and every failure just shows a
+   friendly status and leaves the game untouched.
+   Set ROOM_ENABLED = false to hide the feature completely.
+   ===================================================================== */
+const ROOM_ENABLED = true;
+const MQTT_CDN = 'https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js';
+const BROKERS = [ // tried in order until one connects
+  'wss://broker.emqx.io:8084/mqtt',
+  'wss://broker.hivemq.com:8884/mqtt',
+  'wss://test.mosquitto.org:8081',
+];
+// a stable id lets a player reload mid-match and pick up where they left off
+let myId = '';
+try { myId = localStorage.getItem('zh_id') || ''; } catch (e) {}
+if (!myId) {
+  myId = Math.random().toString(36).slice(2, 8);
+  try { localStorage.setItem('zh_id', myId); } catch (e) {}
+}
+let room = null;
+
+const esc = s => String(s).slice(0, 16).replace(/[&<>"']/g,
+  ch => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[ch]));
+
+function setRoomStatus(msg) { $('roomStatus').textContent = msg; }
+
+function renderBoard() {
+  const b = $('board');
+  updateVsBtn();
+  scheduleCallCheck(); // membership changed — (re)evaluate who we video-call
+  if (!room || versus) { b.innerHTML = ''; return; } // versus draws its own UI
+  let html = '<div class="prow me">' + esc(room.name) + ' <b>' + score + '</b></div>';
+  for (const [pid, d] of room.peers)
+    if (pid !== room.id) html += '<div class="prow">' + esc(d.n || '?') + ' <b>' + (d.s | 0) + '</b></div>';
+  b.innerHTML = html;
+}
+
+function roomPublish() {
+  try {
+    if (room && room.client.connected)
+      room.client.publish(room.topic + room.id,
+        // j = when this player first joined: video pairs the two oldest seats
+        JSON.stringify({ n: room.name, s: score, t: Date.now(), j: myJoinStamp }), { retain: true });
+  } catch (e) {}
+}
+
+let lastPub = 0;
+onScoreChange = (pts) => {
+  if (!room) return;
+  if (versus && versus.playing) { // a kill during my versus turn (brutes = +5)
+    versus.turnScore += (pts || 1);
+    versus.ts[versus.myIdx] = versus.turnScore;
+    if (Date.now() - lastVPub > 500) { lastVPub = Date.now(); vPublish(); }
+    renderVersus();
+  }
+  renderBoard(); // own row updates instantly
+  const n = Date.now();
+  if (n - lastPub > 600) { lastPub = n; roomPublish(); } // heartbeat covers the rest
+};
+
+function connectBroker(url, code, name) {
+  return new Promise((ok, bad) => {
+    const topic = 'zombiehunter1/' + code + '/';
+    const client = mqtt.connect(url, {
+      connectTimeout: 6000, reconnectPeriod: 2000, clean: true,
+      // last-will: if we vanish, the relay clears our retained score
+      will: { topic: topic + myId, payload: '', retain: true },
+    });
+    let inited = false;
+    const fail = setTimeout(() => { if (!inited) { try { client.end(true); } catch (e) {} bad(new Error('timeout')); } }, 8000);
+    client.on('connect', () => {
+      if (inited) return; // reconnects land here too
+      inited = true;
+      clearTimeout(fail);
+      room = { client, code, id: myId, name, topic, peers: new Map() };
+      client.subscribe(topic + '+');
+      roomPublish();
+      room.hb = setInterval(() => {                         // keep-alive + score refresh
+        if (!room) return;
+        if (room.client.connected) roomPublish();
+        else if (!room.client.reconnecting) reJoin();       // see note on reJoin
+      }, 4000);
+      room.prune = setInterval(() => {                      // drop silent players
+        if (!room) return;
+        let changed = false;
+        for (const [pid, d] of room.peers)
+          if (Date.now() - (d.rx || 0) > 15000) { room.peers.delete(pid); changed = true; }
+        if (changed) renderBoard();
+      }, 5000);
+      renderBoard();
+      ok();
+    });
+    client.on('message', (t, msg) => {
+      if (!room) return;
+      const pid = t.split('/').pop();
+      if (pid === '_versus') { onVersusMsg(msg); return; }
+      if (pid === '_rtc') { onRtcMsg(msg); return; }
+      if (pid === '_mode') return; // classic devices publish this; 3D ignores it
+      if (pid === room.id) return;
+      if (!msg || !msg.length) { room.peers.delete(pid); renderBoard(); return; }
+      try {
+        const d = JSON.parse(msg.toString());
+        d.rx = Date.now(); // stamp arrival by OUR clock — sender clocks can be off
+        room.peers.set(pid, d);
+        renderBoard();
+      } catch (e) {}
+    });
+    client.on('error', () => { if (!inited) { clearTimeout(fail); try { client.end(true); } catch (e) {} bad(new Error('connect error')); } });
+  });
+}
+
+// Random three-word room codes (spooky edition): with live video involved, a
+// guessable code matters — 16x16x90 combos beats kids typing "ABC" on both ends.
+const CODE_W1 = ['graveyard', 'crypt', 'shadow', 'raven', 'witch', 'ghost', 'skull', 'moon',
+                 'fog', 'bone', 'ghoul', 'spider', 'pumpkin', 'thorn', 'ember', 'midnight'];
+const CODE_W2 = ['bat', 'wolf', 'rat', 'owl', 'crow', 'viper', 'toad', 'spook',
+                 'fang', 'claw', 'howl', 'creep', 'lurker', 'shade', 'grim', 'hex'];
+function makeCode() {
+  return CODE_W1[Math.floor(Math.random() * CODE_W1.length)] + '-' +
+         CODE_W2[Math.floor(Math.random() * CODE_W2.length)] + '-' +
+         Math.floor(rand(10, 100));
+}
+$('genCode').textContent = makeCode();
+$('newCode').addEventListener('click', () => { $('genCode').textContent = makeCode(); });
+
+async function joinRoom() {
+  const name = ($('pname').value.trim() || 'Player').slice(0, 12);
+  const code = ($('pcode').value.trim() || $('genCode').textContent)
+    .toUpperCase().replace(/[^A-Z0-9-]/g, '').slice(0, 24);
+  if (!code) { setRoomStatus('TAP THE CODE BUTTON OR TYPE ONE'); return; }
+  try { localStorage.setItem('zh_name', name); localStorage.setItem('zh_code', code); } catch (e) {}
+  myJoinStamp = Date.now(); // my seat number for video pairing
+  warnedFull = false;
+  $('joinBtn').disabled = true;
+  setRoomStatus('Connecting…');
+  if (!window.mqtt) { // fetch the library only now, never on page load
+    await new Promise(res => {
+      const s = document.createElement('script');
+      s.src = MQTT_CDN; s.onload = res; s.onerror = res;
+      setTimeout(res, 12000);
+      document.head.appendChild(s);
+    });
+  }
+  if (window.mqtt) {
+    for (const url of BROKERS) {
+      try {
+        await connectBroker(url, code, name);
+        setRoomStatus('ROOM ' + code + ' — SCORES LIVE');
+        $('joinBtn').textContent = 'LEAVE ROOM';
+        $('joinBtn').disabled = false;
+        return;
+      } catch (e) { /* try the next relay */ }
+    }
+  }
+  setRoomStatus('RELAY UNREACHABLE — HUNTING SOLO');
+  $('joinBtn').disabled = false;
+}
+
+// Public relays sometimes kick a client with a CLEAN disconnect, which stops
+// mqtt.js's auto-reconnect for good — the room would die silently. The
+// heartbeat notices the dead client and quietly rebuilds the connection.
+let healing = false;
+async function reJoin() {
+  if (!room || healing) return;
+  healing = true;
+  setRoomStatus('RECONNECTING');
+  const name = room.name, code = room.code;
+  try { clearInterval(room.hb); clearInterval(room.prune); room.client.end(true); } catch (e) {}
+  room = null;
+  for (const url of BROKERS) {
+    try {
+      await connectBroker(url, code, name);
+      setRoomStatus('ROOM ' + code + ' — SCORES LIVE');
+      renderBoard();
+      healing = false;
+      return;
+    } catch (e) { /* next relay */ }
+  }
+  healing = false;
+  setRoomStatus('ROOM LOST — HUNTING SOLO');
+  $('joinBtn').textContent = 'JOIN ROOM';
+  if (versus) exitVersus(false);
+  renderBoard();
+}
+
+function leaveRoom() {
+  if (!room) return;
+  if (versus) exitVersus(true); // walk out of the match too
+  endCall(null, true);          // close the peer connection: nothing transmits anymore
+  const ms = cam.srcObject;     // release the mic entirely — it existed for the call
+  if (ms) ms.getAudioTracks().forEach(tr => { tr.stop(); ms.removeTrack(tr); });
+  myJoinStamp = null; warnedFull = false;
+  clearInterval(room.hb); clearInterval(room.prune);
+  try {
+    room.client.publish(room.topic + room.id, '', { retain: true });
+    room.client.end(true);
+  } catch (e) {}
+  room = null;
+  renderBoard();
+  setRoomStatus('');
+  $('joinBtn').textContent = 'JOIN ROOM';
+}
+
+if (ROOM_ENABLED) {
+  try {
+    $('pname').value = localStorage.getItem('zh_name') || '';
+    $('pcode').value = localStorage.getItem('zh_code') || '';
+  } catch (e) {}
+  $('joinBtn').addEventListener('click', () => room ? leaveRoom() : joinRoom());
+} else {
+  $('roomSec').style.display = 'none';
+}
+
+/* =====================================================================
+   VERSUS — turn-based two-player riding the same room (engine port)
+
+   One parent taps "Versus" on one device; the other device joins in with
+   ZERO clicks. Players alternate 30s turns (the watcher sees the active
+   player's live score in giant text), 3 rounds, a star per round win,
+   most stars takes the match — and both screens celebrate at the end.
+
+   Protocol: one retained JSON blob on <room>/_versus (~200 bytes). Each
+   device is authoritative ONLY while it acts (its own countdown + turn),
+   so no clock sync is needed and 1-2s of relay latency is harmless.
+   Messages carry a sequence number; stale ones are dropped, simultaneous
+   starts tie-break on player id. If the active player vanishes, the
+   other side shows "waiting for <name>" (their round restarts when they
+   come back) and gives up kindly after a minute. None of this runs —
+   or can break anything — outside an explicitly started match.
+   ===================================================================== */
+let TURN_MS = 30000, COUNT_MS = 3000, BETWEEN_MS = 3500, OVER_MS = 6000,
+    STALE_MS = 12000, CANCEL_MS = 60000; // mutable so tests can shrink them
+let versus = null, vSeq = 0, vBy = '', lastVPub = 0;
+
+function bannerShow(txt, ms) {
+  const b = $('banner');
+  b.textContent = txt;
+  b.classList.add('show');
+  clearTimeout(bannerShow.t);
+  bannerShow.t = setTimeout(() => b.classList.remove('show'), ms);
+}
+
+function vPublish() {
+  if (!room || !versus) return;
+  vSeq++; vBy = myId;
+  const m = { v: 1, seq: vSeq, by: myId, st: versus.st, a: versus.a, r: versus.r,
+              w: versus.w, p: versus.p, ts: versus.ts, fin: versus.fin,
+              lw: versus.lw, lr: versus.lr, te: versus.st === 'over' ? Date.now() : 0 };
+  try { room.client.publish(room.topic + '_versus', JSON.stringify(m), { retain: true }); } catch (e) {}
+}
+
+function onVersusMsg(msg) {
+  if (!msg || !msg.length) { if (versus) exitVersus(false); return; } // match cleared
+  let d; try { d = JSON.parse(msg.toString()); } catch (e) { return; }
+  if (!d || d.v !== 1 || !Array.isArray(d.p) || d.p.length !== 2) return;
+  if (d.by === myId) { vSeq = Math.max(vSeq, d.seq); return; } // own echo
+  if (d.seq < vSeq) return;                                    // stale
+  if (d.seq === vSeq && !(d.by !== vBy && d.by < vBy)) return; // dup, or lost tie-break
+  if (d.st === 'over' && Date.now() - (d.te || 0) > 30000) return; // crusty old match
+  vSeq = d.seq; vBy = d.by;
+  applyVersus(d);
+}
+
+// a state someone else published becomes our local truth
+function applyVersus(d) {
+  const myIdx = d.p.findIndex(pl => pl.id === myId);
+  versus = { st: d.st, a: d.a, r: d.r, w: d.w, p: d.p, ts: d.ts || [null, null],
+             fin: d.fin, lw: d.lw, lr: d.lr, myIdx, turnScore: 0, waitSince: 0 };
+  $('panel').classList.add('hidden');
+  if (d.st === 'over') { showOver(); return; }
+  if (myIdx >= 0 && (d.st === 'count' || d.st === 'play') && d.a === myIdx) {
+    // my turn — also lands here when I reload mid-turn: the round restarts
+    startMyCountdown();
+  } else if (myIdx >= 0 && d.st === 'between' && d.a === myIdx) {
+    // round result is on screen; after the pause it's me again
+    setTimeout(() => {
+      if (versus && versus.st === 'between' && !versus.counting) startMyCountdown();
+    }, BETWEEN_MS);
+  }
+  renderVersus();
+  renderBoard();
+}
+
+function startMyCountdown() {
+  if (!versus || versus.counting || versus.playing) return;
+  versus.counting = true;
+  versus.st = 'count'; versus.a = versus.myIdx;
+  if (!versus.ts) versus.ts = [null, null];
+  vPublish();
+  renderVersus();
+  bannerShow('YOUR TURN, ' + versus.p[versus.myIdx].n, 1100);
+  const step = Math.max(400, Math.floor(COUNT_MS / 3));
+  [3, 2, 1].forEach((d, i) => setTimeout(() => {
+    if (!versus || !versus.counting) return; // match changed under us
+    bannerShow(String(d), step * .8);
+    tone(440 + d * 70, 440 + d * 70, .12, 'square', .3);
+  }, 900 + i * step));
+  setTimeout(() => { if (versus && versus.counting) startMyTurn(); }, 900 + step * 3);
+}
+
+function startMyTurn() {
+  versus.counting = false; versus.playing = true;
+  versus.st = 'play'; versus.turnScore = 0;
+  versus.ts[versus.myIdx] = 0;
+  versus.turnEndAt = performance.now() + TURN_MS;
+  vPublish();
+  bannerShow('HUNT', 900);
+  tone(660, 1320, .25, 'triangle', .4);
+  renderVersus();
+}
+
+function endMyTurn() {
+  if (!versus || !versus.playing) return;
+  versus.playing = false;
+  versus.ts[versus.myIdx] = versus.turnScore || 0;
+  tone(700, 240, .4, 'triangle', .35);
+  const other = 1 - versus.myIdx;
+  if (versus.ts[other] == null) {
+    // other player still owes a turn this round — hand them the controls
+    versus.st = 'count'; versus.a = other;
+    vPublish();
+    renderVersus();
+  } else {
+    // round complete: hand out a star (a tie gives one to each — toddlers)
+    versus.lr = versus.r;
+    versus.lw = versus.ts[0] === versus.ts[1] ? -1 : (versus.ts[0] > versus.ts[1] ? 0 : 1);
+    if (versus.lw === -1) { versus.w[0]++; versus.w[1]++; } else versus.w[versus.lw]++;
+    if (versus.r >= 3) {
+      versus.st = 'over'; versus.a = -1;
+      versus.fin = versus.w[0] === versus.w[1] ? -1 : (versus.w[0] > versus.w[1] ? 0 : 1);
+      vPublish();
+      showOver();
+    } else {
+      versus.r++; versus.ts = [null, null];
+      versus.st = 'between'; versus.a = 0; // challenger opens every round
+      vPublish();
+      renderVersus();
+      if (versus.myIdx === 0) setTimeout(() => {
+        if (versus && versus.st === 'between' && !versus.counting) startMyCountdown();
+      }, BETWEEN_MS);
+    }
+  }
+}
+
+function showOver() {
+  const f = versus.fin;
+  const mine = f === versus.myIdx;
+  bannerShow(f === -1 ? 'YOU BOTH WIN'
+    : mine ? versus.p[f].n + ' WINS'
+           : 'GREAT GAME — ' + versus.p[f].n + ' WINS', OVER_MS - 500);
+  playCheer(); setTimeout(playCheer, 700);
+  lightning(); setTimeout(lightning, 700); // both screens end under the storm
+  renderVersus();
+  setTimeout(() => { if (versus && versus.st === 'over') exitVersus(versus.myIdx === 0); }, OVER_MS);
+}
+
+function exitVersus(clearRetained) {
+  if (clearRetained && room) {
+    try { room.client.publish(room.topic + '_versus', '', { retain: true }); } catch (e) {}
+  }
+  versus = null;
+  $('vov').classList.add('hidden');
+  $('tbar').style.display = 'none';
+  const s = $('score'); s.style.display = ''; s.textContent = score;
+  renderBoard();
+  layoutVideos(); // partner returns to the corner PiP
+}
+
+function cancelVersus() {
+  bannerShow('NEXT HUNT SOON', 3000);
+  exitVersus(true);
+}
+
+// runs every frame from the main loop; inert unless a match is active
+function versusTick(now) {
+  if (!versus) return;
+  if (versus.playing) {
+    const left = versus.turnEndAt - now;
+    $('tbar').style.width = Math.max(0, left / TURN_MS * 100) + '%';
+    if (Date.now() - lastVPub > 2000) { lastVPub = Date.now(); vPublish(); } // live score for the watcher
+    if (left <= 0) endMyTurn();
+    return;
+  }
+  if (versus.counting || versus.st === 'over') return;
+  // someone else should be acting — are they still with us?
+  const actor = versus.p[versus.a];
+  if (!actor || actor.id === myId) return;
+  const pr = room && room.peers.get(actor.id);
+  const fresh = pr && Date.now() - (pr.rx || 0) < STALE_MS;
+  if (!fresh) {
+    if (!versus.waitSince) { versus.waitSince = now; renderVersus(); }
+    else if (now - versus.waitSince > CANCEL_MS) {
+      versus.myIdx >= 0 ? cancelVersus() : exitVersus(false);
+    }
+  } else if (versus.waitSince) {
+    versus.waitSince = 0;
+    renderVersus(); // they're back — their device re-reads the match and resumes
+  }
+}
+
+function renderVersus() {
+  if (!versus) return;
+  const vov = $('vov');
+  if (versus.playing) { // my turn: top number = THIS turn's score, bar = time left
+    $('score').style.display = '';
+    $('score').textContent = versus.turnScore;
+    $('tbar').style.display = 'block';
+    vov.classList.add('hidden');
+    return;
+  }
+  $('tbar').style.display = 'none';
+  $('score').style.display = 'none';
+  if (versus.counting) { vov.classList.add('hidden'); return; } // banner digits own the screen
+  const tally = i => '●'.repeat(versus.w[i]) || '–'; // text glyphs, never emoji
+  let t1 = '', t2 = '';
+  if (versus.waitSince) {
+    t1 = 'WAITING FOR ' + versus.p[versus.a].n; t2 = '';
+  } else if (versus.st === 'count') {
+    t1 = 'GET READY — ' + versus.p[versus.a].n + "'S TURN"; t2 = '';
+  } else if (versus.st === 'play') {
+    t1 = versus.p[versus.a].n + "'S TURN";
+    t2 = String((versus.ts && versus.ts[versus.a]) || 0);
+  } else if (versus.st === 'between') {
+    t1 = versus.lw === -1 ? 'ROUND ' + versus.lr + ' IS A TIE'
+                          : versus.p[versus.lw].n + ' WINS ROUND ' + versus.lr;
+    t2 = '●';
+  } else if (versus.st === 'over') {
+    t1 = versus.fin === -1 ? 'YOU BOTH WIN' : versus.p[versus.fin].n + ' WINS';
+    t2 = '';
+  }
+  vov.querySelector('.v1').textContent = t1;
+  vov.querySelector('.v2').textContent = t2;
+  vov.querySelector('.v3').textContent = 'ROUND ' + Math.min(versus.r, 3) + ' OF 3 — ' +
+    versus.p[0].n + ' ' + tally(0) + '  ·  ' + versus.p[1].n + ' ' + tally(1);
+  vov.classList.remove('hidden');
+}
+// every versus state change can flip who's big on screen
+const renderVersusBase = renderVersus;
+renderVersus = function () { renderVersusBase(); layoutVideos(); };
+
+function updateVsBtn() {
+  $('vsBtn').classList.toggle('hidden', !(room && !versus && room.peers.size >= 1));
+}
+
+$('vsBtn').addEventListener('click', () => {
+  if (!room || versus) return;
+  const other = [...room.peers.entries()].find(([pid]) => pid !== room.id);
+  if (!other) return;
+  versus = { st: 'idle', a: 0, r: 1, w: [0, 0], ts: [null, null], fin: null,
+             p: [{ id: myId, n: room.name }, { id: other[0], n: (other[1].n || 'Friend').slice(0, 12) }],
+             myIdx: 0, turnScore: 0, waitSince: 0 };
+  $('panel').classList.add('hidden');
+  startMyCountdown(); // publishes; the other device joins with zero clicks
+});
+
+/* =====================================================================
+   LIVE VIDEO — WebRTC, peer-to-peer, between the two room members.
+
+   The MQTT relay carries ONLY tiny signaling JSON (offers, answers, ICE
+   candidates, ~1-4KB total) on the room's _rtc subtopic. The video and
+   voice themselves go directly device-to-device, end-to-end encrypted by
+   WebRTC itself — they never touch any server.
+
+   Both sides simply create a connection when they see each other and the
+   "perfect negotiation" pattern resolves any collision: the peer with the
+   greater id plays the polite role and rolls back when offers cross.
+   ===================================================================== */
+const RTC_CFG = { iceServers: [
+  { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
+  // TURN fallback slot — add one here only if both homes have strict NATs:
+  // { urls: 'turn:YOUR-TURN-HOST:3478', username: 'user', credential: 'pass' },
+  // (The old free "Open Relay" public TURN was probed 2026-06-11: dead,
+  //  zero relay candidates — deliberately not included.)
+] };
+let VIDEO_FAIL_MS = 20000; // mutable so tests can shrink it
+const mySess = Math.random().toString(36).slice(2, 8); // fresh per page load
+const remoteVid = $('remoteVid');
+let call = null, videoBlocked = false, warnedFull = false, micMuted = false;
+let myJoinStamp = null, callCheckT = 0, lastRebuild = 0;
+
+function rtcSend(to, m) {
+  if (!room) return;
+  try {
+    room.client.publish(room.topic + '_rtc',
+      JSON.stringify(Object.assign({ v: 1, from: myId, to, sess: mySess }, m)));
+  } catch (e) {}
+}
+
+function onRtcMsg(msg) {
+  if (!msg || !msg.length) return;
+  let d; try { d = JSON.parse(msg.toString()); } catch (e) { return; }
+  if (!d || d.v !== 1 || d.from === myId || d.to !== myId) return;
+  if (videoBlocked) return; // we're the third wheel: no signaling at all
+  if (d.type === 'hi') {
+    if (!call || call.partnerId !== d.from) { scheduleCallCheck(); return; }
+    if (call.partnerSess && d.sess && d.sess !== call.partnerSess
+        && Date.now() - lastRebuild > 3000) {
+      lastRebuild = Date.now(); // partner reloaded their page: start over
+      startCall(call.partnerId, call.partnerName);
+      return;
+    }
+    call.partnerSess = d.sess || call.partnerSess;
+    return;
+  }
+  if (call && d.from === call.partnerId) handleSignal(d);
+}
+
+// the "perfect negotiation" receive side — works no matter who offers first
+async function handleSignal(d) {
+  const pc = call.pc;
+  call.partnerSess = d.sess || call.partnerSess;
+  try {
+    if (d.type === 'offer' || d.type === 'answer') {
+      const collision = d.type === 'offer' &&
+        (call.makingOffer || pc.signalingState !== 'stable');
+      call.ignoreOffer = !call.polite && collision;
+      if (call.ignoreOffer) return; // impolite side lets its own offer win
+      await pc.setRemoteDescription({ type: d.type, sdp: d.sdp });
+      while (call.pending.length) { // candidates that arrived early
+        try { await pc.addIceCandidate(call.pending.shift()); } catch (e) {}
+      }
+      if (d.type === 'offer') {
+        await pc.setLocalDescription();
+        rtcSend(call.partnerId, { type: 'answer', sdp: pc.localDescription.sdp });
+      }
+    } else if (d.type === 'ice') {
+      const c = d.cand || null;
+      if (!pc.remoteDescription && c) { call.pending.push(c); return; }
+      try { await pc.addIceCandidate(c); } catch (e) { /* fine if offer ignored */ }
+    } else if (d.type === 'bye') {
+      endCall(call.partnerName + ' TURNED VIDEO OFF');
+    }
+  } catch (e) {}
+}
+
+// One shared camera/mic stream for everything: the hand tracker reads the
+// <video> element, the call sends the same tracks — the camera is never
+// opened twice. Returns null if there's no camera to share (call proceeds
+// receive-only: you still SEE the other player).
+async function ensureMedia() {
+  if (!camOn) {
+    const ok = await startCamera();
+    if (!ok) return null;
+    if (handsStatus === 'off') startHands(); // camera's on now — free upgrade
+  }
+  const s = cam.srcObject;
+  if (s && !s.getAudioTracks().length) {
+    try { // camera was granted video-only earlier: politely re-ask for a mic
+      const a = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+      s.addTrack(a.getAudioTracks()[0]);
+    } catch (e) { /* mic declined → video-only call */ }
+  }
+  try { if (navigator.audioSession) navigator.audioSession.type = sessType(); } catch (e) {}
+  return s;
+}
+
+// the PiP is tiny — cap what we send so gameplay stays smooth on iPads
+function applySendCaps(pc) {
+  for (const sender of pc.getSenders()) {
+    if (!sender.track || sender.track.kind !== 'video') continue;
+    try {
+      const p = sender.getParameters();
+      p.encodings = (p.encodings && p.encodings.length) ? p.encodings : [{}];
+      p.encodings[0].maxBitrate = 400000;       // ~400 kbps
+      p.encodings[0].maxFramerate = 15;
+      p.encodings[0].scaleResolutionDownBy = Math.max(1, (cam.videoWidth || 640) / 480);
+      sender.setParameters(p).catch && sender.setParameters(p).catch(() => {});
+    } catch (e) {}
+  }
+}
+
+function setVidState(st) {
+  if (!call) return;
+  if (call.connState === st) return;
+  call.connState = st;
+  if (st === 'connecting') showChip('CONNECTING VIDEO', 4000);
+  else if (st === 'connected') showChip('VIDEO LINKED: ' + call.partnerName, 3500);
+  else if (st === 'failed')
+    showChip('VIDEO UNAVAILABLE — THE HUNT IS UNAFFECTED', 6000);
+  layoutVideos(); updateSendBadge();
+}
+
+async function startCall(partnerId, partnerName) {
+  if (call) endCall(null, true);
+  const pc = new RTCPeerConnection(RTC_CFG);
+  call = { pc, partnerId, partnerName, polite: myId > partnerId, makingOffer: false,
+           ignoreOffer: false, pending: [], partnerSess: '', connState: '',
+           partnerLostAt: 0, bornAt: Date.now() };
+  pc.onnegotiationneeded = async () => {
+    try {
+      call.makingOffer = true;
+      await pc.setLocalDescription();
+      rtcSend(partnerId, { type: 'offer', sdp: pc.localDescription.sdp });
+    } catch (e) {} finally { call.makingOffer = false; }
+  };
+  pc.onicecandidate = e =>
+    rtcSend(partnerId, { type: 'ice', cand: e.candidate ? e.candidate.toJSON() : null });
+  pc.ontrack = e => {
+    if (e.streams && e.streams[0]) remoteVid.srcObject = e.streams[0];
+    else {
+      if (!(remoteVid.srcObject instanceof MediaStream)) remoteVid.srcObject = new MediaStream();
+      remoteVid.srcObject.addTrack(e.track);
+    }
+    remoteVid.play().catch(() => {});
+    layoutVideos();
+  };
+  pc.oniceconnectionstatechange = () => { // self-healing ladder
+    if (!call || call.pc !== pc) return;
+    const st = pc.iceConnectionState;
+    if (st === 'failed') { try { pc.restartIce(); } catch (e) {} }
+    else if (st === 'disconnected') {
+      clearTimeout(call.restartT);
+      call.restartT = setTimeout(() => {
+        if (call && call.pc === pc && pc.iceConnectionState === 'disconnected') {
+          try { pc.restartIce(); } catch (e) {}
+        }
+      }, 3000);
+    }
+  };
+  pc.onconnectionstatechange = () => {
+    if (!call || call.pc !== pc) return;
+    if (pc.connectionState === 'connected') {
+      clearTimeout(call.failT);
+      setVidState('connected');
+      applySendCaps(pc);
+    } else if (pc.connectionState === 'failed') {
+      setVidState('failed'); // checkCall rebuilds from scratch if they're present
+    }
+  };
+  setVidState('connecting');
+  call.failT = setTimeout(() => {
+    if (call && call.pc === pc && pc.connectionState !== 'connected') setVidState('failed');
+  }, VIDEO_FAIL_MS);
+  rtcSend(partnerId, { type: 'hi' });
+  const s = await ensureMedia();
+  if (s && call && call.pc === pc) {
+    for (const t of s.getTracks()) { try { pc.addTrack(t, s); } catch (e) {} }
+    setMicMuted(micMuted); // re-apply mute choice to the fresh tracks
+    applySendCaps(pc);
+  }
+  updateSendBadge();
+}
+
+function endCall(msg, silent) {
+  if (call) {
+    if (!silent) rtcSend(call.partnerId, { type: 'bye' });
+    clearTimeout(call.failT); clearTimeout(call.restartT);
+    try { call.pc.close(); } catch (e) {}
+  }
+  call = null;
+  remoteVid.srcObject = null;
+  if (msg) showChip(msg, 4000);
+  layoutVideos(); updateSendBadge();
+}
+
+// video pairs the two OLDEST seats in the room (by join time, then id) —
+// a third member keeps playing and syncing scores, but gets no video
+function videoPair() {
+  const m = [{ id: myId, j: myJoinStamp || 9e15 }];
+  for (const [pid, d] of room.peers) m.push({ id: pid, j: d.j || 9e15 });
+  m.sort((a, b) => (a.j - b.j) || (a.id < b.id ? -1 : 1));
+  return m.slice(0, 2);
+}
+
+function scheduleCallCheck() { clearTimeout(callCheckT); callCheckT = setTimeout(checkCall, 800); }
+
+function checkCall() {
+  if (!ROOM_ENABLED) return;
+  if (!room) { if (call) endCall(null, true); return; }
+  const pair = videoPair();
+  videoBlocked = room.peers.size >= 2 && !pair.some(x => x.id === myId);
+  if (videoBlocked) {
+    if (!warnedFull) {
+      warnedFull = true;
+      showChip('VIDEO FULL — TWO HUNTERS ALREADY ON CAMERA. SCORES STILL SYNC', 7000);
+    }
+    if (call) endCall(null, true);
+    return;
+  }
+  const other = pair.find(x => x.id !== myId);
+  const pd = other && room.peers.get(other.id);
+  const fresh = pd && Date.now() - (pd.rx || 0) < 12000;
+  if (!other || !fresh) {
+    if (call && !call.partnerLostAt) call.partnerLostAt = Date.now();
+    if (call && Date.now() - call.partnerLostAt > 30000)
+      endCall('VIDEO OFF — ' + call.partnerName + ' LEFT THE ROOM');
+    return;
+  }
+  if (call && call.partnerId === other.id) {
+    call.partnerLostAt = 0;
+    const cs = call.pc.connectionState;
+    // never finished connecting and it's been a while → something deadlocked
+    const stuck = (cs === 'new' || cs === 'connecting') && Date.now() - call.bornAt > 10000;
+    if (Date.now() - lastRebuild > 3000) {
+      if (cs === 'failed' && !stuck) {
+        lastRebuild = Date.now();
+        try { call.pc.restartIce(); return; } catch (e) {} // fresh candidates, same call
+      }
+      if (cs === 'failed' || cs === 'closed' || stuck) {
+        lastRebuild = Date.now();
+        startCall(other.id, call.partnerName); // renegotiate from scratch
+      }
+    }
+    return;
+  }
+  startCall(other.id, (pd.n || 'Friend').slice(0, 12));
+}
+
+// Which video is big and which is the corner PiP.
+// Free play: partner in the corner; tap the PiP to swap who's big.
+// Versus: automatic — THEIR turn puts their video fullscreen behind the
+// giant name + live score (you're watching your kid play: the point),
+// YOUR turn shrinks them back to the corner so you can slice.
+let vidSwap = false;
+function layoutVideos() {
+  const on = !!(call && remoteVid.srcObject);
+  const watching = !!(versus && !versus.playing && !versus.counting);
+  const remoteBig = on && (watching || (vidSwap && !versus));
+  remoteIsBig = remoteBig; // the canvas hides its scenery behind a fullscreen partner
+  remoteVid.style.display = on ? 'block' : 'none';
+  remoteVid.className = on ? (remoteBig ? 'vid-bg' : 'vid-pip') : '';
+  cam.classList.toggle('vid-pip', on && remoteBig && camOn); // selfie shrinks to the corner
+  const pipHasVideo = remoteBig ? camOn : true;
+  $('pipTag').style.display = on && pipHasVideo ? 'block' : 'none';
+  $('pipName').textContent = !on ? '' : (remoteBig ? 'YOU' : (call.partnerName || ''));
+}
+
+// tap the PiP to swap big/small (free play); drag it to any corner
+function pipPointer(el) {
+  let down = false, moved = false, sx = 0, sy = 0;
+  el.addEventListener('pointerdown', e => {
+    if (!el.classList.contains('vid-pip')) return;
+    down = true; moved = false; sx = e.clientX; sy = e.clientY;
+    try { el.setPointerCapture(e.pointerId); } catch (err) {}
+  });
+  el.addEventListener('pointermove', e => {
+    if (!down) return;
+    if (Math.hypot(e.clientX - sx, e.clientY - sy) > 12) moved = true;
+    if (moved) // follow the finger corner-by-corner
+      document.body.dataset.pip =
+        (e.clientY < innerHeight / 2 ? 't' : 'b') + (e.clientX < innerWidth / 2 ? 'l' : 'r');
+  });
+  el.addEventListener('pointerup', () => {
+    if (!down) return;
+    down = false;
+    if (!moved && !versus) { vidSwap = !vidSwap; layoutVideos(); } // tap = swap
+  });
+}
+pipPointer(cam); pipPointer(remoteVid);
+
+function setMicMuted(m) {
+  micMuted = m;
+  const s = cam.srcObject;
+  if (s) s.getAudioTracks().forEach(t => { t.enabled = !m; });
+  $('muteBtn').textContent = m ? 'MUTED' : 'MIC';
+  $('muteBtn').classList.toggle('muted', m);
+  updateSendBadge();
+}
+$('muteBtn').addEventListener('click', () => setMicMuted(!micMuted));
+
+function updateSendBadge() {
+  const sending = !!(call && call.pc &&
+    call.pc.getSenders().some(sn => sn.track && sn.track.readyState === 'live'));
+  $('sendBadge').style.display = sending ? 'block' : 'none';
+  $('sendTxt').textContent = micMuted ? 'ON CAMERA · MIC OFF' : 'ON CAMERA';
+}
+
+// ---------- debug hooks for automated tests (harmless to leave in) ----------
+window.__game = {
+  get score() { return score; },
+  get kills() { return kills; },
+  get enemies() { return enemies; },
+  get fruits() { return enemies; }, // the original harness name — same list
+  get running() { return running; },
+  // photoreal sprite status: which kinds run on image sprites right now
+  get photoSprites() { return Object.keys(photos); },
+  get photosPending() { return photosPending; },
+  get photoMeta() {
+    const m = {};
+    for (const [k, p] of Object.entries(photos))
+      m[k] = { aspect: +p.aspect.toFixed(3), eyes: p.eyes.map(e => e.map(v => +v.toFixed(3))) };
+    return m;
+  },
+  get particleCounts() {
+    return { add: fxAdd ? fxAdd.n : 0, smoke: fxSmoke ? fxSmoke.n : 0,
+             corpses: corpses.length };
+  },
+  get worldEnemies() {
+    return enemies.map(e => ({ kind: e.kind.id, x: +e.x.toFixed(2),
+      y: +e.cy.toFixed(2), z: +e.z.toFixed(2), hp: e.hp, glb: !!e.glb,
+      sx: Math.round(e.sx), sy: Math.round(e.sy), sr: Math.round(e.sr),
+      hittable: !!e.hittable }));
+  },
+  get scareCount() { return scareCount; },
+  get modelStatus() {
+    const m = {};
+    for (const k of Object.keys(ENEMY3D)) m[k] = glbs[k] ? 'model' : 'billboard';
+    return m;
+  },
+  get camOn() { return camOn; },
+  get handsStatus() { return handsStatus; },
+  get audio() { return { state: AC ? AC.state : null,
+    silentLoop: !!silentEl && !silentEl.paused, silentLoopSet: silentEl ? silentEl.loop : null,
+    silentInline: silentEl ? silentEl.src.startsWith('data:audio/wav;base64,') : null,
+    silentBytes: silentEl ? silentEl.src.length : 0 }; },
+  get delegate() { return currentDelegate; },
+  get landmarker() { return landmarker; },
+  get handSeen() { return performance.now() - lastHandSeen < 1000; },
+  get pill() { return { text: $('pill').textContent, cls: $('pill').className }; },
+  get markers() { return handSmooth.size; },
+  // detection internals for the test harness
+  get detectState() { return { fed: fedFrames.length, lastDet, detEvery,
+    handsOK, rebuilding, targets: handTargets.length, camReady: cam.readyState }; },
+  // drive N detection ticks synchronously (headless pages throttle RAF, which
+  // starves the loop mid-test; this pumps the REAL detectHands instead)
+  pump(n) {
+    for (let i = 0; i < (n || 1); i++) { lastDet = 0; detectHands(performance.now()); }
+  },
+  // drive the REAL simulation forward synchronously (headless RAF throttling
+  // starves the loop mid-test; one call = one update step of `ms` game time)
+  tick(ms) {
+    const now = performance.now();
+    update((ms || 16) / 1000, now);
+    projectEnemies();
+    versusTick(now);
+    updatePill(now);
+  },
+  // audio attestation (module scope hides the voices from page eval)
+  testVoice(name) {
+    const V = { playPop, playGrunt, playGroan, playWhisper, playScreech,
+                playRoar, playThunder, playHowl, playClaw, playCheer };
+    if (!V[name]) return 'unknown';
+    V[name](1);
+    return 'ok';
+  },
+  get room() { return room && { code: room.code, peers: [...room.peers.keys()], connected: room.client.connected }; },
+  get versus() { return versus && { st: versus.st, a: versus.a, r: versus.r, w: [...versus.w],
+    ts: versus.ts && [...versus.ts], fin: versus.fin, myIdx: versus.myIdx,
+    playing: !!versus.playing, counting: !!versus.counting, waiting: !!versus.waitSince }; },
+  get vov() { const o = $('vov'); return { hidden: o.classList.contains('hidden'),
+    t1: o.querySelector('.v1').textContent, t2: o.querySelector('.v2').textContent,
+    t3: o.querySelector('.v3').textContent }; },
+  setVersusTiming(turn, count, between, stale, over, cancel) {
+    TURN_MS = turn; COUNT_MS = count; BETWEEN_MS = between;
+    if (stale) STALE_MS = stale; if (over) OVER_MS = over; if (cancel) CANCEL_MS = cancel;
+  },
+  get call() { return call && { partner: call.partnerId, partnerName: call.partnerName,
+    polite: call.polite, state: call.connState, sig: call.pc.signalingState,
+    conn: call.pc.connectionState, ice: call.pc.iceConnectionState,
+    hasRemote: !!remoteVid.srcObject, remoteW: remoteVid.videoWidth,
+    senders: call.pc.getSenders().filter(sn => sn.track).map(sn => sn.track.kind) }; },
+  get videoBlocked() { return videoBlocked; },
+  get micMuted() { return micMuted; },
+  setVideoTiming(ms) { VIDEO_FAIL_MS = ms; },
+  videoToScreen,
+  triggerLightning() { lightning(); },
+  setStormIn(ms) { nextStorm = performance.now() + ms; },
+  get flashLevel() { return flash; },
+  get nextStormIn() { return nextStorm ? nextStorm - performance.now() : null; },
+  // tests aim by SCREEN coords: the enemy is pinned on the camera ray
+  // through (sx, sy) at 8m, so its projected center lands exactly there
+  spawnType(id, sx, sy) {
+    const kind = KINDS.find(k => k.id === id);
+    if (!kind) return null;
+    const dir = new THREE.Vector3((sx / W) * 2 - 1, -(sy / H) * 2 + 1, .5)
+      .unproject(camera).sub(camera.position).normalize();
+    const p = camera.position.clone()
+      .add(dir.multiplyScalar(Math.abs(8 / dir.z)));
+    const e = { kind, hp: kind.hp, t: 0, phase: 0, flash: 0, kick: 0,
+                x: p.x, z: p.z, xAim: p.x, spd: 0, pin: true,
+                baseY: p.y, cy: p.y, gaitY: 0, roll: 0, stomp: 0,
+                sx, sy, sr: 0, hittable: true };
+    dressEnemy(e);
+    e.mesh.position.set(e.x, e.cy, e.z);
+    enemies.push(e);
+    projectEnemies(); // fresh sx/sy/sr immediately, RAF or not
+    return e;
+  },
+  spawnAt(sx, sy) { return this.spawnType(KINDS[0].id, sx, sy); },
+  clearEnemies() { while (enemies.length) despawnEnemy(0, false); },
+  sliceAll() {
+    while (enemies.length) { enemies[0].hp = 1; enemies[0].iv = 0; slashEnemy(0, 0); }
+  },
+  get fps() { return Math.round(__fps); },
+  get degradeStep() { return degradeStep; },
+  setDegrade,
+  get drawCalls() { return renderer ? renderer.info.render.calls : 0; },
+  // TEST ONLY: pretend camera + tracker are live so fed frames can drive the
+  // real pipeline without hardware. No landmarker exists — detection idles
+  // whenever the fed queue is empty (cam.readyState stays 0), so this can
+  // never call into MediaPipe by accident.
+  enableHandsForTest() {
+    camOn = true; handsOK = true; handsStatus = 'on';
+    lastHandSeen = performance.now();
+  },
+  // feed synthetic index-fingertip positions ([nx,ny] in camera coords, null =
+  // empty frame) through the REAL detection pipeline, one per detection tick
+  feedLandmarks(frames) {
+    fedFrames.push(...frames.map(f => f ? {
+      landmarks: [Array.from({ length: 21 }, () => ({ x: f[0], y: f[1], z: 0 }))],
+      handednesses: [[{ categoryName: 'Right' }]],
+    } : { landmarks: [], handednesses: [] }));
+  },
+};
+
+// ---------- boot the night ----------
+// invoked last so every function and binding above already exists; the
+// head watchdog flips the classic-mode escape hatch if we never get here
+initWorld();
+initFx();
+requestAnimationFrame(loop);
+window.__threeBooted = true;
+clearTimeout(window.__bootWatch);
+</script>
+</body>
+</html>
