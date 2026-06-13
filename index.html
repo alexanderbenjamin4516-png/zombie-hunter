@@ -123,6 +123,17 @@
       pointer-events:none; z-index:10; opacity:0; transform:scale(.5);
       transition:opacity .15s, transform .25s cubic-bezier(.2,1.8,.4,1); }
   #combo.show { opacity:1; transform:scale(1); }
+  /* combo meter: a thin ember bar draining over the 1s chain window */
+  #comboBar { position:fixed; top:calc(env(safe-area-inset-top, 0px) + 20px + min(11vw, 72px) + min(7vw, 40px));
+      left:50%; width:140px; height:4px; margin-left:-70px;
+      background:rgba(4,14,8,.8); border:1px solid rgba(255,154,60,.35);
+      border-radius:2px; z-index:10; pointer-events:none; display:none; }
+  #comboBar i { display:block; height:100%; background:var(--ember);
+      transform-origin:left; }
+  #comboBar.glow { box-shadow:0 0 10px rgba(255,154,60,.6); }
+  #comboBar.pulse { animation:cbpulse .4s ease-in-out infinite; }
+  @keyframes cbpulse { 0%,100%{box-shadow:0 0 8px rgba(255,154,60,.5)}
+      50%{box-shadow:0 0 20px rgba(255,176,102,.95)} }
   #chip { position:fixed; bottom:calc(env(safe-area-inset-bottom, 0px) + 64px); left:50%;
       transform:translateX(-50%); background:var(--panelbg); color:#cfe0c4; padding:8px 16px;
       border:1px solid var(--paneledge); border-radius:4px; font-size:13px;
@@ -265,6 +276,7 @@
 <div id="score">0</div>
 <div id="banner"></div>
 <div id="combo"></div>
+<div id="comboBar"><i></i></div>
 <div id="chip"></div>
 <div id="pill" class="hidden"></div>
 <div id="hint"></div>
@@ -273,6 +285,8 @@
 <div id="panel" class="hidden">
   <h3>ZOMBIE SPEED</h3>
   <label>SLOW <input id="speed" type="range" min="0.5" max="1.6" step="0.05"> FAST</label>
+  <h3>BRIGHTNESS</h3>
+  <label>DIM <input id="bright" type="range" min="0.5" max="2" step="0.05"> BRIGHT</label>
   <div id="audState"></div>
   <div id="roomSec">
     <h3>HUNT TOGETHER</h3>
@@ -375,6 +389,20 @@ $('speed').addEventListener('input', e => {
 $('gear').addEventListener('click', () => { $('panel').classList.toggle('hidden'); updateAudState(); });
 $('closePanel').addEventListener('click', () => $('panel').classList.add('hidden'));
 
+// BRIGHTNESS — real displays vary wildly (the first hardware test proved
+// it). Pass 2: the slider multiplies the LIGHT RIG, not the exposure —
+// exposure also lifts the flat fog color, which washed the whole frame
+// gray at max. Lights only touch lit surfaces; the night stays black.
+let brightMul = 1;
+try { brightMul = parseFloat(localStorage.getItem('zh_bright')) || 1; } catch (e) {}
+$('bright').value = brightMul;
+$('bright').addEventListener('input', e => {
+  brightMul = parseFloat(e.target.value);
+  if (flashlight) flashlight.intensity = FL_BASE * brightMul;
+  // ambient/dir/rim pick brightMul up in render() every frame
+  try { localStorage.setItem('zh_bright', brightMul); } catch (err) {}
+});
+
 // ---------- sounds: tiny synthesized WebAudio, no files needed ----------
 // iOS rules, all handled here:
 // - an AudioContext only makes sound after being created/resumed inside a
@@ -459,7 +487,76 @@ function updateAudState() {
   el.textContent = 'AUDIO: ' + (AC ? AC.state : 'not started — tap START first') + sess;
 }
 setInterval(updateAudState, 1000);
-function tone(f0, f1, dur, type, vol, delay) {
+
+/* ---------- the bus: every voice goes through one master chain ----------
+   master gain -> compressor -> speakers, with two sends: a convolver
+   loaded with a synthesized 1.7s decaying-noise impulse (a real SPACE —
+   the single biggest de-goofifier) and a tanh waveshaper for grit on
+   roars and impacts. Built lazily on the AC that the FROZEN initAudio
+   created; this code never creates or resumes an AudioContext. */
+let BUS = null;
+function bus() {
+  if (!AC) return null;
+  if (BUS) return BUS;
+  try {
+    const comp = AC.createDynamicsCompressor();
+    comp.threshold.value = -14; comp.knee.value = 18; comp.ratio.value = 5;
+    comp.attack.value = .004; comp.release.value = .18;
+    const master = AC.createGain();
+    master.gain.value = .85;
+    master.connect(comp);
+    comp.connect(AC.destination);
+    const conv = AC.createConvolver();
+    const len = (AC.sampleRate * 1.7) | 0;
+    const ir = AC.createBuffer(2, len, AC.sampleRate);
+    for (let ch = 0; ch < 2; ch++) {
+      const d = ir.getChannelData(ch);
+      for (let i = 0; i < len; i++)
+        d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2.6);
+    }
+    conv.buffer = ir;
+    const verbIn = AC.createGain();
+    verbIn.connect(conv);
+    conv.connect(master);
+    const shaper = AC.createWaveShaper();
+    const cur = new Float32Array(257);
+    for (let i = 0; i < 257; i++) cur[i] = Math.tanh(2.6 * (i / 128 - 1));
+    shaper.curve = cur;
+    const shaperOut = AC.createGain();
+    shaperOut.gain.value = .8;
+    shaper.connect(shaperOut);
+    shaperOut.connect(master);
+    BUS = { master, verbIn, shaper };
+  } catch (e) {
+    BUS = { master: null, verbIn: null, shaper: null }; // ancient browser: raw out
+  }
+  return BUS;
+}
+// route a voice: dry to master (+ optional reverb send + optional stereo pan)
+function out(node, send, pan) {
+  const B = bus();
+  if (!B || !B.master) { try { node.connect(AC.destination); } catch (e) {} return; }
+  let n = node;
+  if (pan && AC.createStereoPanner) {
+    const p = AC.createStereoPanner();
+    p.pan.value = Math.max(-1, Math.min(1, pan));
+    node.connect(p);
+    n = p;
+  }
+  n.connect(B.master);
+  if (send && B.verbIn) {
+    const s = AC.createGain();
+    s.gain.value = send;
+    n.connect(s);
+    s.connect(B.verbIn);
+  }
+}
+function grit(node) { // grit path for roars/impacts; falls back to dry
+  const B = bus();
+  if (B && B.shaper) node.connect(B.shaper); else out(node);
+}
+
+function tone(f0, f1, dur, type, vol, delay, send, pan) {
   if (!AC) return;
   const t = AC.currentTime + (delay || 0);
   const o = AC.createOscillator(), g = AC.createGain();
@@ -468,12 +565,13 @@ function tone(f0, f1, dur, type, vol, delay) {
   o.frequency.exponentialRampToValueAtTime(Math.max(f1, 1), t + dur);
   g.gain.setValueAtTime(vol || .4, t);
   g.gain.exponentialRampToValueAtTime(.001, t + dur);
-  o.connect(g).connect(AC.destination);
+  o.connect(g);
+  out(g, send, pan);
   o.start(t); o.stop(t + dur + .05);
 }
 // shared noise maker: a decaying noise burst through one filter — this is
 // the raw material for splats, rasps and thunder
-function noiseBurst(dur, type, freq, q, vol, delay) {
+function noiseBurst(dur, type, freq, q, vol, delay, send, pan) {
   if (!AC) return;
   const t0 = AC.currentTime + (delay || 0);
   const len = Math.max(1, Math.floor(AC.sampleRate * dur));
@@ -482,61 +580,128 @@ function noiseBurst(dur, type, freq, q, vol, delay) {
   const src = AC.createBufferSource(); src.buffer = buf;
   const f = AC.createBiquadFilter(); f.type = type; f.frequency.value = freq; f.Q.value = q;
   const g = AC.createGain(); g.gain.value = vol;
-  src.connect(f); f.connect(g); g.connect(AC.destination);
+  src.connect(f); f.connect(g);
+  out(g, send, pan);
   src.start(t0);
 }
 
-function playPop(pitchUp) { // wet slash-splat (combos pitch it up)
+function playPop(pitchUp) { // CHUNKY kill impact (combos still pitch it up)
   if (!AC) return;
   const p = pitchUp || 1;
-  tone(150 * p, 45, .16, 'square', .32);                 // squelchy body
-  tone(420 * p, 90, .07, 'sawtooth', .16);               // the blade's edge
-  noiseBurst(.12, 'lowpass', 900 * Math.sqrt(p), 2.5, .5, 0); // the wet part
+  const t = AC.currentTime;
+  const o = AC.createOscillator(), g = AC.createGain(); // meaty body, gritted
+  o.type = 'square';
+  o.frequency.setValueAtTime(110 * p, t);
+  o.frequency.exponentialRampToValueAtTime(38, t + .14);
+  g.gain.setValueAtTime(.5, t);
+  g.gain.exponentialRampToValueAtTime(.001, t + .16);
+  o.connect(g);
+  grit(g);
+  o.start(t); o.stop(t + .2);
+  noiseBurst(.1, 'lowpass', 700 * Math.sqrt(p), 1.5, .6, 0, .15); // wet crunch
+  noiseBurst(.05, 'highpass', 2400, 1, .25, 0);                   // blade snap
+  tone(58, 30, .12, 'sine', .6, 0, .1);                           // sub thock
 }
-function playGrunt() { // brute takes a hit
-  tone(130, 60, .18, 'square', .35);
-  noiseBurst(.1, 'lowpass', 500, 1, .25, 0);
+function playGrunt() { // brute takes a hit — low, gritted
+  if (!AC) return;
+  const t = AC.currentTime;
+  const o = AC.createOscillator(), g = AC.createGain();
+  o.type = 'square';
+  o.frequency.setValueAtTime(90, t);
+  o.frequency.exponentialRampToValueAtTime(45, t + .18);
+  g.gain.setValueAtTime(.45, t);
+  g.gain.exponentialRampToValueAtTime(.001, t + .2);
+  o.connect(g);
+  grit(g);
+  o.start(t); o.stop(t + .25);
+  noiseBurst(.1, 'lowpass', 400, 1, .25, 0, .2);
 }
-function playGroan() { // low zombie moan wobbling downward
+function playGroan(pan, dist) { // dark distant moan, mostly space
+  if (!AC) return;
+  const t = AC.currentTime;
+  const vol = Math.max(.05, .18 - .11 * Math.min(1, (dist || 0) / 30));
+  const o = AC.createOscillator(), o2 = AC.createOscillator(), g = AC.createGain();
+  o.type = 'sawtooth';
+  o.frequency.setValueAtTime(65, t);
+  o.frequency.linearRampToValueAtTime(48, t + .6);
+  o.frequency.linearRampToValueAtTime(56, t + 1.1);
+  o.frequency.linearRampToValueAtTime(40, t + 1.8);
+  o2.type = 'sine'; // sub octave under it
+  o2.frequency.setValueAtTime(32, t);
+  const f = AC.createBiquadFilter();
+  f.type = 'lowpass'; f.frequency.value = 240; f.Q.value = 6;
+  g.gain.setValueAtTime(.0001, t);
+  g.gain.exponentialRampToValueAtTime(vol, t + .25);
+  g.gain.exponentialRampToValueAtTime(.001, t + 1.9);
+  o.connect(f); o2.connect(f); f.connect(g);
+  out(g, .8, pan);
+  o.start(t); o.stop(t + 2);
+  o2.start(t); o2.stop(t + 2);
+}
+function playWhisper() { // ghoul: a cold draft of air
+  noiseBurst(.5, 'highpass', 2400, .6, .05, 0, .6);
+  tone(420, 200, .5, 'sine', .05, 0, .6);
+}
+function playScreech() { // bat: darker, raspier chirps
+  tone(1900, 700, .12, 'sawtooth', .08, 0, .3);
+  tone(1500, 600, .1, 'sawtooth', .07, .13, .3);
+}
+function playShuffle(pan) { // wet dragging steps somewhere in the dark
+  noiseBurst(.12, 'lowpass', 480, 2, .12, 0, .7, pan);
+  noiseBurst(.09, 'lowpass', 430, 2, .09, .13, .7, pan);
+  tone(90, 60, .08, 'sine', .06, .05, .5, pan);
+}
+function playRoar(big) { // guttural: low duo with a growl curve, through grit
+  if (!AC) return;
+  const t = AC.currentTime, dur = big ? 1.1 : .6, v = big ? .9 : .5;
+  for (const [f0, type] of [[45, 'sawtooth'], [70, 'square']]) {
+    const o = AC.createOscillator(), g = AC.createGain();
+    o.type = type;
+    const curve = new Float32Array(16); // ragged breath, falls off
+    for (let i = 0; i < 16; i++)
+      curve[i] = Math.max(20, f0 * (1 + (Math.random() * .16 - .08)) * (1 - i / 24));
+    o.frequency.setValueAtTime(f0, t);
+    try { o.frequency.setValueCurveAtTime(curve, t + .02, dur - .04); } catch (e) {}
+    g.gain.setValueAtTime(.0001, t);
+    g.gain.exponentialRampToValueAtTime(v, t + .07);
+    g.gain.exponentialRampToValueAtTime(.001, t + dur);
+    o.connect(g);
+    grit(g);
+    o.start(t); o.stop(t + dur + .05);
+  }
+  noiseBurst(dur * .7, 'lowpass', 200, 1.5, v * .4, 0, .5); // breath rasp in space
+}
+function playLungeStinger(pan) { // it LUNGES: shriek + slam, make them flinch
   if (!AC) return;
   const t = AC.currentTime;
   const o = AC.createOscillator(), g = AC.createGain();
   o.type = 'sawtooth';
-  o.frequency.setValueAtTime(95, t);
-  o.frequency.linearRampToValueAtTime(70, t + .35);
-  o.frequency.linearRampToValueAtTime(82, t + .6);
-  o.frequency.linearRampToValueAtTime(55, t + 1);
-  const f = AC.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 320; f.Q.value = 4;
-  g.gain.setValueAtTime(.0001, t);
-  g.gain.exponentialRampToValueAtTime(.2, t + .12);
-  g.gain.exponentialRampToValueAtTime(.001, t + 1.05);
-  o.connect(f); f.connect(g); g.connect(AC.destination);
-  o.start(t); o.stop(t + 1.1);
+  o.frequency.setValueAtTime(1400, t);
+  o.frequency.exponentialRampToValueAtTime(220, t + .18);
+  g.gain.setValueAtTime(.3, t);
+  g.gain.exponentialRampToValueAtTime(.001, t + .2);
+  o.connect(g);
+  grit(g);
+  o.start(t); o.stop(t + .25);
+  noiseBurst(.3, 'highpass', 1800, 2, .5, 0, .4, pan);
+  tone(90, 45, .25, 'sine', .5, .02, .3);
 }
-function playWhisper() { // ghoul: a cold draft of air
-  noiseBurst(.5, 'highpass', 2400, .6, .05, 0);
-  tone(420, 200, .5, 'sine', .05);
+function playFinisher() { // the brute drops: a boom you feel
+  tone(48, 24, .9, 'sine', .9, 0, .7);
+  noiseBurst(1.2, 'lowpass', 110, .8, .6, 0, .7);
 }
-function playScreech() { // bat: two falling chirps
-  tone(2600, 1100, .12, 'square', .12);
-  tone(2100, 900, .1, 'square', .1, .13);
+const COMBO_STEPS = [0, 3, 5, 7, 10, 12, 15, 17, 19]; // minor pentatonic climb
+function playComboTone(n) {
+  const f = 220 * Math.pow(2, COMBO_STEPS[Math.min(n, 8)] / 12);
+  tone(f, f * 1.01, .12, 'triangle', .22, 0, .25);
 }
-function playRoar(big) { // brute: layered low growl that rears up then drops
-  if (!AC) return;
-  const t = AC.currentTime, dur = big ? .9 : .5, v = big ? .5 : .28;
-  for (const [f0, f1, type] of [[60, 38, 'sawtooth'], [92, 55, 'square']]) {
-    const o = AC.createOscillator(), g = AC.createGain();
-    o.type = type;
-    o.frequency.setValueAtTime(f0, t);
-    o.frequency.linearRampToValueAtTime(f0 * 1.25, t + dur * .3);
-    o.frequency.exponentialRampToValueAtTime(f1, t + dur);
-    g.gain.setValueAtTime(.0001, t);
-    g.gain.exponentialRampToValueAtTime(v, t + .06);
-    g.gain.exponentialRampToValueAtTime(.001, t + dur);
-    o.connect(g).connect(AC.destination);
-    o.start(t); o.stop(t + dur + .05);
-  }
-  noiseBurst(dur * .8, 'lowpass', 240, 1.5, v * .5, 0); // breathy rasp
+function playComboBreak() { // the chain slips: soft thud
+  tone(140, 60, .18, 'sine', .3, 0, .2);
+  noiseBurst(.12, 'lowpass', 300, 1, .2, 0, .2);
+}
+function playLullStinger() { // the quiet between waves is not comfort
+  tone(1244, 1180, 1.2, 'sine', .12, 0, .9);
+  tone(622, 590, 1.2, 'sine', .08, .05, .9);
 }
 function playThunder(soft) { // deep rolling rumble, two overlapping waves
   if (!AC) return;
@@ -559,8 +724,53 @@ function playHowl() { // lonely wolf: rise, hold with vibrato, fall away
   g.gain.exponentialRampToValueAtTime(.32, t + .2);
   g.gain.setValueAtTime(.32, t + 1.1);
   g.gain.exponentialRampToValueAtTime(.001, t + 1.6);
-  o.connect(g).connect(AC.destination);
+  o.connect(g);
+  out(g, .6); // a howl needs the night air
   o.start(t); o.stop(t + 1.7);
+}
+
+// ---------- the drone: the night has a sound, barely there ----------
+let DRONE = null;
+function startDrone() {
+  const B = bus();
+  if (!B || !B.master || DRONE) return;
+  try {
+    const t = AC.currentTime;
+    const master = AC.createGain();
+    master.gain.setValueAtTime(.0001, t);
+    master.gain.linearRampToValueAtTime(1, t + 3);
+    const len = AC.sampleRate * 4; // looped noise floor
+    const buf = AC.createBuffer(1, len, AC.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    const src = AC.createBufferSource();
+    src.buffer = buf;
+    src.loop = true;
+    const nf = AC.createBiquadFilter();
+    nf.type = 'lowpass'; nf.frequency.value = 220; nf.Q.value = .7;
+    const ng = AC.createGain();
+    ng.gain.value = .05;
+    src.connect(nf); nf.connect(ng); ng.connect(master);
+    const of2 = AC.createBiquadFilter(); // detuned low pair: a 0.7Hz beat
+    of2.type = 'lowpass'; of2.frequency.value = 160;
+    for (const fq of [55, 55.7]) {
+      const o = AC.createOscillator();
+      o.type = 'triangle';
+      o.frequency.value = fq;
+      o.connect(of2);
+      o.start(t);
+    }
+    const og = AC.createGain();
+    og.gain.value = .045;
+    of2.connect(og); og.connect(master);
+    const lfo = AC.createOscillator(), lg = AC.createGain(); // slow swell
+    lfo.frequency.value = .07;
+    lg.gain.value = .02;
+    lfo.connect(lg); lg.connect(ng.gain); lfo.start(t);
+    out(master, .3);
+    src.start(t);
+    DRONE = { master };
+  } catch (e) { DRONE = { master: null }; }
 }
 function playClaw() { // an enemy got too close: three fabric-rip rasps
   noiseBurst(.22, 'highpass', 1800, 1.2, .4, 0);
@@ -574,7 +784,7 @@ function playCheer() {
 
 // ---------- game state ----------
 let enemies = [];
-let score = 0, kills = 0, running = false, nextSpawn = 0, MAXF = 8;
+let score = 0, kills = 0, running = false, nextSpawn = 0, MAXF = 4;
 
 /* ---------- the horde: five enemy kinds (data) ----------
    hp / pts / spawn weight are the proven 2D values. How each kind looks
@@ -755,7 +965,7 @@ function pointCheck(x, y, pad) {
 
 // combo: kills landing within 1s of each other raise the splat pitch and
 // pop a x2/x3 callout — very satisfying
-let comboN = 0, comboT = 0;
+let comboN = 0, comboT = 0, nextBeat = 0;
 let onScoreChange = () => {}; // the optional shared room hooks in here
 
 function showCombo(n) {
@@ -770,6 +980,22 @@ function showCombo(n) {
 let shakeAmp = 0;
 function addShake(a) { shakeAmp = Math.min(12, shakeAmp + a); }
 
+// time dilation: hitstop on kills, slow-mo on finishers. Only the WORLD
+// dt is scaled — every contractual clock (versus turns, combo window,
+// brute shield, scare cooldown, storms, trails, input, tracking) is
+// wall-time and keeps running, so the frozen engine contracts hold.
+// .05 not 0: a residual crawl reads as impact, and the decay math
+// (pow(k, dt)) stays well-behaved.
+let stopUntil = 0, slowUntil = 0, slowK = 1;
+function hitstop(ms) { stopUntil = Math.max(stopUntil, performance.now() + ms); }
+function slowmo(ms, k) {
+  slowUntil = Math.max(slowUntil, performance.now() + ms);
+  slowK = k;
+}
+function timeScaleAt(now) {
+  return now < stopUntil ? .05 : now < slowUntil ? slowK : 1;
+}
+
 // glowing green ichor — never red
 const ICHOR = ['#7dff5e', '#4ddb3a', '#b6ff7a', '#2fae22'];
 
@@ -783,17 +1009,84 @@ function celebrate() { // every 25 kills: a private lightning storm
   setTimeout(playHowl, 520);
 }
 
+/* ---------- the wave director (solo only) ----------
+   Horror pacing instead of a metronome: a LULL where nothing comes but
+   the dark talks to you (panned groans and shuffles), then a CLUSTER
+   pushes in together down one lane, then CLEARING while you finish
+   them, then a beat of QUIET that is not comfort — then again, a
+   little harder. Wall clock throughout: dread doesn't slow down
+   because the world did. Score still climbs forever — lulls shrink
+   as kills mount, clusters grow. */
+let dir = { st: 'lull', t0: 0, dur: 2000, next: 0, left: 0, lane: 0 };
+function director(now) {
+  if (!dir.t0) dir.t0 = now; // first call of a run
+  const since = now - dir.t0;
+  if (dir.st === 'lull') {
+    if (now > dir.next) {
+      dir.next = now + rand(1400, 3200);
+      const pan = rand(-.8, .8);
+      if (Math.random() < .55) playGroan(pan, rand(16, 28));
+      else playShuffle(pan);
+    }
+    if (since > dir.dur) {
+      dir.st = 'cluster';
+      dir.t0 = now;
+      dir.left = 2 + Math.min(2, Math.floor(kills / 15));
+      dir.lane = rand(-3, 3);
+      dir.next = now; // the first one steps out immediately
+    }
+  } else if (dir.st === 'cluster') {
+    if (dir.left > 0 && now > dir.next && enemies.length < MAXF) {
+      spawn(dir.lane);
+      dir.left--;
+      dir.next = now + rand(900, 1600) / speedMul;
+    }
+    if (dir.left <= 0) { dir.st = 'clearing'; dir.t0 = now; }
+  } else if (dir.st === 'clearing') {
+    if (!enemies.length || since > 25000) {
+      dir.st = 'quiet';
+      dir.t0 = now;
+      dir.dur = rand(2500, 4000);
+      playLullStinger();
+    }
+  } else { // quiet — breathe. it isn't over.
+    if (since > dir.dur) {
+      dir.st = 'lull';
+      dir.t0 = now;
+      dir.dur = Math.max(3500, 9000 - kills * 50);
+      dir.next = now + rand(600, 1400);
+    }
+  }
+}
+
 // ---------- physics + drawing ----------
 function update(dt, now) {
-  // in a Versus match, things only come out of the fog during YOUR turn
-  const maySpawn = !versus || versus.playing;
-  if (maySpawn && now > nextSpawn && enemies.length < MAXF) {
-    spawn();
-    nextSpawn = now + rand(1400, 2200) / speedMul;
+  if (versus) {
+    // Versus keeps the legacy cadence VERBATIM: both ends of a room must
+    // see the same economy even if the other side runs an older build
+    if (versus.playing && now > nextSpawn && enemies.length < MAXF) {
+      spawn();
+      nextSpawn = now + rand(1400, 2200) / speedMul;
+    }
+  } else {
+    director(now);
   }
   updateEnemies(dt, now);
   updateCorpses(dt);
   if (fxAdd) { fxAdd.update(dt); fxSmoke.update(dt); }
+  if (!DRONE && AC) startDrone(); // the bed starts once audio exists
+  // heartbeat tracks the nearest thing in the dark (wall clock)
+  let nearest = 99;
+  for (const e of enemies) nearest = Math.min(nearest, -e.z);
+  if (nearest < 18 && now > nextBeat) {
+    const k = Math.pow(Math.max(0, Math.min(1, (18 - nearest) / 15)), 1.2);
+    nextBeat = now + 1400 - 950 * k;
+    const v = .22 + .3 * Math.max(0, Math.min(1, (10 - nearest) / 9));
+    tone(54, 36, .12, 'sine', v, 0, .1);
+    tone(46, 34, .1, 'sine', v * .7, .18, .1);
+  }
+  // the chain slips: same expiry the next kill would compute anyway
+  if (comboN >= 2 && now - comboT > 1000) { comboN = 0; playComboBreak(); }
   if (!nextStorm) nextStorm = now + rand(30000, 60000);
   if (now > nextStorm) {
     lightning();
@@ -810,9 +1103,16 @@ function update(dt, now) {
    does the detail work. No shadow maps anywhere.
    ===================================================================== */
 let renderer = null, scene3, camera, composer, bloomPass, gradePass;
-let dirLight, ambLight, moonHalo, camBaseQ = null;
+let dirLight, ambLight, rimLight, moonHalo, flashlight, camBaseQ = null;
 let fires = [], windowGroups = [], hordeBoards = [];
-const FOG_COLOR = 0x041208, FOG_D = 0.055;
+const FOG_COLOR = 0x041208, FOG_D = 0.04;
+// Tuning pass 2 root-cause fix: these MUST be the single source of truth.
+// render() rebuilds light intensity every frame for the lightning envelope,
+// so any value set only in initWorld is dead code (that bug ate pass 1).
+const BASE_EXPOSURE = 1.7;     // FIXED — exposure lifts the flat fog color too,
+                               // which is why the old slider washed out at max
+const AMB_BASE = 1.35, DIR_BASE = 1.45, RIM_BASE = 2.2, FL_BASE = 55;
+const EMISSIVE_FLOOR = 0x0f2412; // creatures may be dark, never pure black
 let PARTICLE_K = 1, degradeStep = 0, __fps = 60;
 
 // lightning: the 2D game's exact double-blink envelope, now driving the
@@ -827,7 +1127,7 @@ function lightning() {
 
 // final color pass: vignette + animated grain + lightning wash + scare tint
 const GradeShader = {
-  uniforms: { tDiffuse: { value: null }, uTime: { value: 0 }, uGrain: { value: .034 },
+  uniforms: { tDiffuse: { value: null }, uTime: { value: 0 }, uGrain: { value: .026 },
               uFlash: { value: 0 }, uScare: { value: 0 } },
   vertexShader: 'varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }',
   fragmentShader: [
@@ -837,8 +1137,9 @@ const GradeShader = {
     'void main(){',
     '  vec4 c = texture2D(tDiffuse, vUv);',
     '  float d = distance(vUv, vec2(.5,.46));',
-    '  c.rgb *= 1.0 - smoothstep(.4,1.0,d)*.66;',
-    '  c.rgb += (hash(vUv*977.0 + mod(uTime,97.0)) - .5) * uGrain;',
+    '  c.rgb *= 1.0 - smoothstep(.4,1.0,d)*.46;',
+    '  float luma = dot(c.rgb, vec3(.299,.587,.114));',
+    '  c.rgb += (hash(vUv*977.0 + mod(uTime,97.0)) - .5) * uGrain * clamp(luma*4.0, .12, 1.0);',
     '  c.rgb = mix(c.rgb, vec3(.83,1.0,.85), uFlash*.34);',
     '  c.rgb = mix(c.rgb, vec3(.04,.12,.06), uScare*smoothstep(.2,.85,d));',
     '  gl_FragColor = c;',
@@ -915,7 +1216,7 @@ function initWorld() {
   renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 1.5)); // perf budget cap
   renderer.setSize(W, H);
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.5;
+  renderer.toneMappingExposure = BASE_EXPOSURE; // fixed; brightness drives lights
 
   scene3 = new THREE.Scene();
   scene3.background = new THREE.Color(FOG_COLOR);
@@ -926,13 +1227,29 @@ function initWorld() {
   camera.lookAt(0, 1.2, -12);
   camBaseQ = camera.quaternion.clone();
 
-  ambLight = new THREE.AmbientLight(0x1c3a26, 1.05);
-  dirLight = new THREE.DirectionalLight(0xbcd4ff, 1.1);
+  // all intensities come from the *_BASE constants — render() re-applies
+  // them every frame (lightning + the BRIGHTNESS slider), so values set
+  // only here would be dead on arrival
+  ambLight = new THREE.AmbientLight(0x1c3a26, AMB_BASE);
+  dirLight = new THREE.DirectionalLight(0xbcd4ff, DIR_BASE); // cool moon key
   dirLight.position.set(-14, 30, -20);
-  scene3.add(ambLight, dirLight);
+  // rim: from behind-above the horde toward the camera — lights shoulder
+  // and head edges so silhouettes always separate from the dark
+  rimLight = new THREE.DirectionalLight(0xa8ffc0, RIM_BASE);
+  rimLight.position.set(4, 16, -46);
+  scene3.add(ambLight, dirLight, rimLight);
 
-  // ground: wet asphalt — low roughness + the cold moonlight = the sheen
-  const groundMat = new THREE.MeshStandardMaterial({ color: 0x4a554c, roughness: .35, metalness: .18 });
+  // the player's flashlight — the night stays dark, YOUR light reveals
+  // what's coming. Hot center, soft penumbra edge, rakes to ~28m.
+  flashlight = new THREE.SpotLight(0xfff0d2, FL_BASE, 28, .50, .70, 1.2);
+  flashlight.position.set(0, 1.55, .2);
+  flashlight.target.position.set(0, .8, -16);
+  scene3.add(flashlight, flashlight.target);
+
+  // ground: damp asphalt. Roughness matters more than it looks: a glossy
+  // floor mirrors the eye-height flashlight's specular lobe STRAIGHT back
+  // into the camera as a giant clipped pool (which bloom then eats).
+  const groundMat = new THREE.MeshStandardMaterial({ color: 0x4a554c, roughness: .62, metalness: .06 });
   loadStreetTex('asphalt_diff_1k.jpg', 'asphalt', 4, 16, groundMat);
   const ground = new THREE.Mesh(new THREE.PlaneGeometry(22, 90), groundMat);
   ground.rotation.x = -Math.PI / 2;
@@ -1062,7 +1379,11 @@ function initWorld() {
   // post chain: render -> bloom (half res) -> grade -> output
   composer = new EffectComposer(renderer);
   composer.addPass(new RenderPass(scene3, camera));
-  bloomPass = new UnrealBloomPass(new THREE.Vector2(W / 2, H / 2), .45, .35, .85);
+  // threshold at clip-only: the lit floor under the flashlight tone-maps to
+  // ~.9 over a huge area and was blooming into center-screen soup. Emissives
+  // are DESIGNED >1.0 (eyes, ribbon, fires, beam core) so they still ignite;
+  // the moon sits far below and never blooms.
+  bloomPass = new UnrealBloomPass(new THREE.Vector2(W / 2, H / 2), .4, .35, .98);
   composer.addPass(bloomPass);
   gradePass = new ShaderPass(GradeShader);
   composer.addPass(gradePass);
@@ -1075,7 +1396,7 @@ const DEGRADE = [
   () => { gradePass.uniforms.uGrain.value = 0; },
   () => { PARTICLE_K = .5; },
   () => { renderer.setPixelRatio(1); composer.setSize(W, H); },
-  () => { MAXF = 5; },
+  () => { MAXF = 3; },
 ];
 function setDegrade(n) {
   while (degradeStep < Math.min(n, DEGRADE.length)) DEGRADE[degradeStep++]();
@@ -1098,10 +1419,11 @@ function render(now) {
   const fdt = now - flashAt; // double-blink: pop, dip, pop, fade
   flash = fdt < 70 ? .95 : fdt < 140 ? .35 : fdt < 240 ? .8
         : Math.max(0, .8 - (fdt - 240) / 450 * .8);
-  dirLight.intensity = 1.1 + 3.2 * flash;
-  ambLight.intensity = 1.05 + 1.5 * flash;
+  dirLight.intensity = (DIR_BASE + 3.2 * flash) * brightMul;
+  ambLight.intensity = (AMB_BASE + 1.5 * flash) * brightMul;
+  rimLight.intensity = (RIM_BASE + 1.5 * flash) * brightMul;
   scene3.fog.density = FOG_D * (1 - .4 * flash);
-  if (bloomPass.enabled) bloomPass.strength = .45 + .5 * flash;
+  if (bloomPass.enabled) bloomPass.strength = .4 + .5 * flash;
   gradePass.uniforms.uFlash.value = flash;
   gradePass.uniforms.uTime.value = now * .001;
   const sdt = now - scareT; // claw scare: fast in, slow out, 750ms total
@@ -1133,20 +1455,48 @@ function render(now) {
     camera.position.set(0, 1.6, 0);
     camera.quaternion.copy(camBaseQ);
   }
+  // the flashlight is in your hand: it inherits the camera's jitter
+  flashlight.position.set(camera.position.x, camera.position.y - .05,
+                          camera.position.z + .2);
 
   updateRibbons(now);
   updateMarkers(now);
 
+  // slash flashes fade on the wall clock so they burn THROUGH the hitstop
+  for (const f of slashFlashes) {
+    if (!f.m.visible) continue;
+    const t = (now - f.t0) / 120;
+    if (t >= 1) { f.m.visible = false; continue; }
+    f.m.material.opacity = 1 - t;
+    const s = f.base * (1 + t * .35);
+    f.m.scale.set(s, s * .12 * (1 - t * .5), 1);
+  }
+  // the chain bar drains over the same 1s window the combo math uses
+  if (comboBarEl === undefined) comboBarEl = $('comboBar');
+  if (comboBarEl) {
+    if (comboN >= 1) {
+      const left = Math.max(0, 1 - (now - comboT) / 1000);
+      comboBarEl.style.display = 'block';
+      comboBarEl.firstElementChild.style.transform = 'scaleX(' + left.toFixed(3) + ')';
+      comboBarEl.classList.toggle('glow', comboN >= 3 && comboN < 6);
+      comboBarEl.classList.toggle('pulse', comboN >= 6);
+    } else if (comboBarEl.style.display !== 'none') {
+      comboBarEl.style.display = 'none';
+    }
+  }
+
   if (remoteIsBig) return; // fullscreen call video owns the GPU while watching
   composer.render();
 }
+let comboBarEl;
 
 let last = performance.now();
 function loop(now) {
   requestAnimationFrame(loop);
-  const dt = Math.min((now - last) / 1000, .05);
+  const wdt = Math.min((now - last) / 1000, .05);
   last = now;
-  if (running) { update(dt, now); projectEnemies(); detectHands(now); versusTick(now); }
+  const ts = timeScaleAt(now); // hitstop/slow-mo scale the world, not the clocks
+  if (running) { update(wdt * ts, now); projectEnemies(); detectHands(now); versusTick(now); }
   render(now);
   updatePill(now);
   perfGuard(now);
@@ -1172,6 +1522,10 @@ const ENEMY3D = { // world height (m), center height, forward speed (m/s)
 const corpses = [];
 let scareT = -9e9, lastScare = 0, scareCount = 0;
 let fxAdd = null, fxSmoke = null;
+// the lunge: burst speed per kind, and a global limiter so a pack
+// arriving together doesn't all pounce in the same instant
+const LUNGE_V = { shambler: 5.5, crawler: 4.2, ghoul: 5.0, bat: 5.5, brute: 3.2 };
+let lastLungeAt = 0;
 
 // ---------- two particle pools: additive ichor/sparks, soft dark smoke ----
 const softTex = (() => {
@@ -1253,6 +1607,16 @@ class FxPool {
       this.px[i*3] += this.pv[i*3] * dt;
       this.px[i*3+1] += this.pv[i*3+1] * dt;
       this.px[i*3+2] += this.pv[i*3+2] * dt;
+      // ground splat: a falling drop hits the street, stops and spreads
+      // (grow doubles as the been-here flag so the clamp fires once)
+      if (this.px[i*3+1] < .02 && this.pv[i*3+1] < 0) {
+        this.px[i*3+1] = .02;
+        this.pv[i*3+1] = 0;
+        if (this.grow[i] < 1.5) {
+          this.grow[i] += 1.5;
+          this.pv[i*3] *= .2; this.pv[i*3+2] *= .2;
+        }
+      }
       this.sz[i] += this.grow[i] * dt;
       this.al[i] = 1 - this.age[i] / this.life[i];
     }
@@ -1266,20 +1630,70 @@ class FxPool {
 function initFx() {
   fxAdd = new FxPool(400, THREE.AdditiveBlending, -3);   // ichor falls
   fxSmoke = new FxPool(160, THREE.NormalBlending, .35);  // smoke climbs
+  initSlashFlash();
+}
+
+// ---------- slash flash: one hot streak along the cut, gone in 120ms ----
+const slashFlashes = [];
+function initSlashFlash() {
+  for (let i = 0; i < 4; i++) {
+    const m = new THREE.Mesh(bbGeo, new THREE.MeshBasicMaterial({
+      map: softTex, transparent: true, opacity: 0,
+      depthTest: false, depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      color: new THREE.Color(1.4, 2.6, 1.2) })); // hotter than 1: bloom ignites it
+    m.visible = false;
+    m.renderOrder = 110;
+    scene3.add(m);
+    slashFlashes.push({ m, t0: 0, base: 1 });
+  }
+}
+function spawnSlashFlash(e, ang, k) {
+  if (!slashFlashes.length) return;
+  const crossed = e.kind && e.kind.id === 'brute' ? 2 : 1;
+  const len = Math.max(1.2, (e.worldR || .5) * 3) * k * (crossed === 2 ? 1.6 : 1);
+  for (let j = 0; j < crossed; j++) {
+    const f = slashFlashes.find(q => !q.m.visible) || slashFlashes[j];
+    f.m.position.set(e.x, e.cy, e.z);
+    f.m.quaternion.copy(camera.quaternion);
+    f.m.rotateZ(-ang + (j ? Math.PI / 2 : 0)); // screen y is flipped; brute: an X
+    f.base = len;
+    f.m.scale.set(len, len * .12, 1);
+    f.t0 = performance.now();
+    f.m.visible = true;
+    f.m.material.opacity = 1;
+  }
 }
 const ICHOR_RGB = ICHOR.map(h => [parseInt(h.slice(1, 3), 16) / 255,
                                   parseInt(h.slice(3, 5), 16) / 255,
                                   parseInt(h.slice(5, 7), 16) / 255]);
 
-function ichorBurst(e, k) {
+function ichorBurst(e, k, ang = 0) {
   if (!fxAdd) return;
-  const n = Math.round(18 * k + 6);
+  // screen-space cut angle -> world: screen y points down, world y points up
+  const cx = Math.cos(ang), cyv = -Math.sin(ang);
+  const n = Math.round(26 * k + 8);
   for (let i = 0; i < n; i++) {
-    const a = rand(0, Math.PI * 2), up = rand(-.3, 1.4), sp = rand(1.2, 3.4) * Math.min(k, 1.6);
     const c = ICHOR_RGB[(Math.random() * ICHOR_RGB.length) | 0];
-    fxAdd.spawn(e.x, e.cy, e.z,
-                Math.cos(a) * sp, up * sp, Math.sin(a) * sp * .4,
-                rand(.35, .7), rand(.1, .22) * Math.min(k, 1.5), 0,
+    const u = Math.random();
+    let vx, vy, vz, life, size;
+    if (u < .6) {        // the fan: arcs along the cut, biased up + at the camera
+      const sp = rand(2.5, 5) * Math.min(k, 1.6), j = rand(-.55, .55);
+      vx = (cx + j * .6) * sp * rand(.6, 1);
+      vy = (cyv * .8 + rand(.35, 1.1)) * sp * .55;
+      vz = rand(.4, 1.6);
+      life = rand(.45, .85); size = rand(.09, .18);
+    } else if (u < .85) { // omni mist around the wound
+      const a = rand(0, Math.PI * 2), sp = rand(1, 2.2);
+      vx = Math.cos(a) * sp; vy = rand(-.2, 1.6); vz = Math.sin(a) * sp * .5;
+      life = rand(.3, .6); size = rand(.1, .2);
+    } else {              // fast droplets that live long enough to splat
+      const a = rand(0, Math.PI * 2), sp = rand(4, 6.5);
+      vx = Math.cos(a) * sp * .6; vy = rand(1.5, 3); vz = rand(.5, 2);
+      life = rand(.7, 1.1); size = rand(.07, .12);
+    }
+    fxAdd.spawn(e.x, e.cy, e.z, vx, vy, vz,
+                life, size * Math.min(k, 1.5), 0,
                 c[0] * 1.6, c[1] * 1.6, c[2] * 1.6); // >1 greens catch the bloom
   }
 }
@@ -1371,7 +1785,12 @@ const GLB_FILES = { shambler: 'models/zombie.glb', crawler: 'models/crawler.glb'
       const size = new THREE.Vector3();
       box.getSize(size);
       gltf.userData = { rawH: Math.max(size.y, .01), rawMinY: box.min.y };
-      gltf.scene.traverse(o => { if (o.material) o.material.fog = true; });
+      gltf.scene.traverse(o => {
+        if (o.material) {
+          o.material.fog = true;
+          if (o.material.emissive) o.material.emissive.setHex(EMISSIVE_FLOOR);
+        }
+      });
       glbs[kid] = gltf;
     } catch (e) { /* billboard fallback */ }
   }
@@ -1409,7 +1828,8 @@ function dressEnemy(e) {
     const bt = billboardTexFor(kid);
     const w = Math.min(P.h * bt.aspect, P.h * 2.6);
     const mat = new THREE.MeshLambertMaterial({ map: bt.tex, alphaTest: .25,
-                                                side: THREE.DoubleSide });
+                                                side: THREE.DoubleSide,
+                                                emissive: EMISSIVE_FLOOR });
     e.mesh = new THREE.Mesh(bbGeo, mat);
     e.mesh.scale.set(w, P.h, 1);
     e.meshYOff = 0;
@@ -1434,13 +1854,17 @@ function dressEnemy(e) {
   scene3.add(e.blob);
 }
 
-function spawn() {
+function spawn(lane) {
   const now = performance.now();
   const kind = pickKind(now);
   if (kind.id === 'brute') lastBrute = now;
   const P = ENEMY3D[kind.id];
+  // a director lane makes a cluster PUSH IN together instead of scattering
   const e = { kind, hp: kind.hp, t: 0, phase: rand(0, 6.28), flash: 0, kick: 0,
-              x: rand(-5.5, 5.5), z: -rand(28, 36), xAim: rand(-1.6, 1.6),
+              x: lane !== undefined ? lane + rand(-1.8, 1.8) : rand(-5.5, 5.5),
+              z: -rand(22, 30),
+              xAim: lane !== undefined ? lane * .4 + rand(-1.2, 1.2)
+                                       : rand(-1.6, 1.6),
               spd: rand(P.speed[0], P.speed[1]) * speedMul,
               baseY: P.y0, cy: P.y0, gaitY: 0, roll: 0, stomp: 0,
               sx: -999, sy: -999, sr: 0, hittable: false };
@@ -1492,12 +1916,33 @@ function updateEnemies(dt, now) {
         e.roll = Math.sin(e.stomp * Math.PI * 2) * .05;
         e.gaitY = Math.abs(Math.sin(e.stomp * Math.PI * 2)) * .08;
       }
+      // THE LUNGE: close enough to smell you — it drops the shuffle and
+      // bursts straight in. The claw scare then fires at contact, so the
+      // scare becomes a two-beat: snarl ... CLAWS.
+      if (!e.lunging && e.z > (k === 'brute' ? -3.8 : -3.4)
+          && now - lastLungeAt > 600) {
+        e.lunging = true;
+        e.lungeT = 0;
+        e.xAim = 0;
+        lastLungeAt = now;
+        if (k === 'brute') playRoar(true);
+        else playLungeStinger(Math.max(-.8, Math.min(.8, e.x / 8)));
+      }
+      if (e.lunging) {
+        e.lungeT += dt;
+        const s = Math.min(1, e.lungeT / .15); // smoothstep up to burst speed
+        fwd = LUNGE_V[k] * s * s * (3 - 2 * s);
+        e.gaitY = -.12 * Math.sin(Math.min(1, e.lungeT / .45) * Math.PI); // pounce dip
+        if (k === 'bat') e.baseY += (1.2 - e.baseY) * Math.min(1, dt * 6); // dives at your face
+        e.x += (0 - e.x) * Math.min(1, dt * 3); // hard steer onto you
+      }
       e.z += fwd * dt;
       e.x += (e.xAim - e.x) * .12 * dt; // drift into the player's lane
       if (e.z > -1.3) { clawScare(i); continue; } // reached you — scare, no harm
     }
     e.cy = e.baseY + e.gaitY;
-    if (e.mixer) e.mixer.update(dt * (0.6 + 0.8 * Math.min(1, e.spd)));
+    if (e.mixer) e.mixer.update(dt * (e.lunging ? 2.4
+                                    : 0.6 + 0.8 * Math.min(1, e.spd)));
     // face the camera (boards yaw-only) or the walk direction (models:
     // Mixamo rigs face +Z, and they advance toward +z — yaw 0 plus a small
     // steer toward the lane they're drifting into)
@@ -1506,13 +1951,19 @@ function updateEnemies(dt, now) {
                                    camera.position.z - e.z);
     e.mesh.position.set(e.x, e.cy + e.meshYOff, e.z);
     e.mesh.rotation.set(0, yaw, e.roll);
-    if (e.eyeMat)
-      e.eyeMat.opacity = (.5 + .3 * Math.sin(now / 170 + e.phase)) *
-        Math.max(.25, Math.min(1, 1 - (-e.z - 20) / 12));
+    if (e.eyeMat) {
+      // eyes get HOTTER with distance: far enemies are trackable by their
+      // glow long before their bodies resolve out of the fog — and they
+      // FLARE when the thing commits to you
+      const far = Math.min(1.9, Math.max(1, 1 + (-e.z - 8) / 18))
+                * (e.lunging ? 1.5 : 1);
+      e.eyeMat.color.setRGB(.7 * far, 2.1 * far, .5 * far);
+      e.eyeMat.opacity = .55 + .3 * Math.sin(now / 170 + e.phase);
+    }
     if (e.flash > 0 && e.mesh.material) { // brute stagger: white-hot emissive pulse
       e.mesh.material.emissive.setScalar(e.flash * .9);
     } else if (e.mesh.material && e.mesh.material.emissive) {
-      e.mesh.material.emissive.setScalar(0);
+      e.mesh.material.emissive.setHex(EMISSIVE_FLOOR); // back to the readable floor
     }
     e.blob.position.set(e.x, .02, e.z);
     const alt = Math.max(0, e.cy - P.y0 * .5);
@@ -1522,13 +1973,17 @@ function updateEnemies(dt, now) {
   }
 }
 
-// crumple + dissolve: the body folds, sinks and fades into smoke
-function beginCrumple(e) {
+// crumple + dissolve: the body is SHOVED along the cut, folds, sinks
+// and fades into smoke. ang is the screen-space cut angle; power is the
+// knockback strength (3.2 normal, 4.5 brute).
+function beginCrumple(e, ang = 0, power = 0) {
   e.mesh.children.forEach(c => { c.visible = false; });
   const mats = [];
   e.mesh.traverse(o => { if (o.material) { o.material.transparent = true; mats.push(o.material); } });
   corpses.push({ mesh: e.mesh, blob: e.blob, mats, t: 0,
                  sx: e.mesh.scale.x, sy: e.mesh.scale.y,
+                 vx: Math.cos(ang) * power, vz: -.8 * power, // away from you
+                 vy: power ? 1.2 : 0,
                  side: Math.random() < .5 ? -1 : 1, y0: e.mesh.position.y });
   smokeBurst(e.x, e.cy, e.z, 8);
 }
@@ -1536,7 +1991,14 @@ function updateCorpses(dt) {
   for (let i = corpses.length - 1; i >= 0; i--) {
     const c = corpses[i];
     c.t += dt;
-    const k = Math.min(1, c.t / .38);
+    const damp = Math.pow(.01, dt); // the shove dies out in about a second
+    c.mesh.position.x += c.vx * dt;
+    c.mesh.position.z += c.vz * dt;
+    c.y0 += c.vy * dt;
+    c.vx *= damp; c.vz *= damp; c.vy *= damp;
+    c.blob.position.x = c.mesh.position.x; // the shadow rides along
+    c.blob.position.z = c.mesh.position.z;
+    const k = Math.min(1, c.t / .55);
     c.mesh.scale.y = c.sy * Math.max(.1, 1 - k * .9);
     c.mesh.rotation.z = c.side * k * .55;
     c.mesh.position.y = c.y0 * (1 - k * .7) + .12;
@@ -1589,7 +2051,7 @@ function projectEnemies() {
     const dist = Math.hypot(e.x - camera.position.x, e.cy - camera.position.y,
                             e.z - camera.position.z);
     e.sr = Math.max((e.worldR * projK) / Math.max(dist, .5), 26); // 26px floor: deep
-    e.hittable = !behind && e.z > -22 &&                          // targets stay fair
+    e.hittable = !behind && e.z > -24 &&                          // targets stay fair
                  e.sx > -60 && e.sx < W + 60 && e.sy > -60 && e.sy < H + 60;
   }
 }
@@ -1605,14 +2067,20 @@ function slashEnemy(i, ang) {
     e.iv = now + 420;
     e.flash = .3;                          // white-hot stagger flash
     e.kick = Math.cos(ang) * 1.7;          // shoved along the cut, in world x
+    hitstop(35);                           // a tick of resistance: it's MEAT
     addShake(4);
-    ichorBurst(e, .5);
+    ichorBurst(e, .5, ang);
     playGrunt();
     return;
   }
 
   enemies.splice(i, 1);
   kills++;
+  const isBrute = e.kind.id === 'brute';
+  hitstop(e.lunging ? 80 : 60);            // the world holds its breath
+  spawnSlashFlash(e, ang, 1 + .08 * Math.min(comboN, 6));
+  ichorBurst(e, isBrute ? 1.8 : 1, ang);
+  if (e.lunging) ichorBurst(e, .8, ang);   // killed mid-air: extra spray
   score += e.kind.pts;
   const el = $('score');
   el.textContent = score;
@@ -1621,17 +2089,18 @@ function slashEnemy(i, ang) {
 
   comboN = (now - comboT < 1000) ? comboN + 1 : 0;
   comboT = now;
-  if (comboN >= 1) showCombo(comboN + 1);
+  if (comboN >= 1) { showCombo(comboN + 1); playComboTone(comboN); }
   playPop(Math.pow(1.07, Math.min(comboN, 8)));
 
-  const isBrute = e.kind.id === 'brute';
-  ichorBurst(e, isBrute ? 1.8 : 1);
   ptext('+' + e.kind.pts, e.sx, e.sy);
-  addShake(isBrute ? 9 : 2.5);
-  beginCrumple(e); // the corpse entry now owns the mesh + blob fade-out
+  addShake(isBrute ? 9 : e.lunging ? 6 : 2.5);
+  beginCrumple(e, ang, isBrute ? 4.5 : 3.2); // corpse owns mesh + blob fade-out
   if (isBrute) {
     bannerShow('BRUTE DOWN  +5', 1500);
-    ichorBurst({ x: e.x, cy: e.cy, z: e.z }, 2.2);
+    ichorBurst({ x: e.x, cy: e.cy, z: e.z }, 2.2, ang);
+    slowmo(400, .25);                      // the finisher: savor the fall
+    playFinisher();
+    addShake(12);
     playRoar(true);
   }
   if (kills % 25 === 0 && !versus) celebrate();
@@ -2019,7 +2488,9 @@ function startGame() {
   $('start').classList.add('hidden');
   $('gear').style.display = 'block';
   running = true;
-  nextSpawn = performance.now() + 1500; // the first thing crawls out shortly
+  nextSpawn = performance.now() + 1500; // versus cadence: first spawn shortly
+  // a fresh run opens on a SHORT lull — kids shouldn't wait 9s for monsters
+  dir = { st: 'lull', t0: performance.now(), dur: 2000, next: 0, left: 0, lane: 0 };
   showChip('SLASH WHAT COMES OUT OF THE FOG', 2500);
   try { navigator.wakeLock && navigator.wakeLock.request('screen').catch(() => {}); } catch (e) {}
 }
@@ -2831,7 +3302,7 @@ window.__game = {
     return enemies.map(e => ({ kind: e.kind.id, x: +e.x.toFixed(2),
       y: +e.cy.toFixed(2), z: +e.z.toFixed(2), hp: e.hp, glb: !!e.glb,
       sx: Math.round(e.sx), sy: Math.round(e.sy), sr: Math.round(e.sr),
-      hittable: !!e.hittable }));
+      hittable: !!e.hittable, lunging: !!e.lunging }));
   },
   get scareCount() { return scareCount; },
   get modelStatus() {
@@ -2862,15 +3333,22 @@ window.__game = {
   // starves the loop mid-test; one call = one update step of `ms` game time)
   tick(ms) {
     const now = performance.now();
-    update((ms || 16) / 1000, now);
+    update((ms || 16) / 1000 * timeScaleAt(now), now); // production parity
     projectEnemies();
     versusTick(now);
     updatePill(now);
   },
+  get timeScale() { return timeScaleAt(performance.now()); },
+  cancelTimefx() { stopUntil = 0; slowUntil = 0; slowK = 1; },
+  // one synchronous render — headless RAF starves render-side state
+  // (slash flashes, combo bar) exactly like it starves update()
+  frame() { render(performance.now()); },
   // audio attestation (module scope hides the voices from page eval)
   testVoice(name) {
     const V = { playPop, playGrunt, playGroan, playWhisper, playScreech,
-                playRoar, playThunder, playHowl, playClaw, playCheer };
+                playRoar, playThunder, playHowl, playClaw, playCheer,
+                playShuffle, playLungeStinger, playFinisher, playComboTone,
+                playComboBreak, playLullStinger };
     if (!V[name]) return 'unknown';
     V[name](1);
     return 'ok';
@@ -2901,15 +3379,16 @@ window.__game = {
   get nextStormIn() { return nextStorm ? nextStorm - performance.now() : null; },
   // tests aim by SCREEN coords: the enemy is pinned on the camera ray
   // through (sx, sy) at 8m, so its projected center lands exactly there
-  spawnType(id, sx, sy) {
+  spawnType(id, sx, sy, dist) {
     const kind = KINDS.find(k => k.id === id);
     if (!kind) return null;
     const dir = new THREE.Vector3((sx / W) * 2 - 1, -(sy / H) * 2 + 1, .5)
       .unproject(camera).sub(camera.position).normalize();
     const p = camera.position.clone()
-      .add(dir.multiplyScalar(Math.abs(8 / dir.z)));
+      .add(dir.multiplyScalar(Math.abs((dist || 8) / dir.z)));
     const e = { kind, hp: kind.hp, t: 0, phase: 0, flash: 0, kick: 0,
-                x: p.x, z: p.z, xAim: p.x, spd: 0, pin: true,
+                x: p.x, z: p.z, xAim: p.x, pin: true,
+                spd: ENEMY3D[id].speed[0], // movement only runs if a test unpins
                 baseY: p.y, cy: p.y, gaitY: 0, roll: 0, stomp: 0,
                 sx, sy, sr: 0, hittable: true };
     dressEnemy(e);
@@ -2919,13 +3398,42 @@ window.__game = {
     return e;
   },
   spawnAt(sx, sy) { return this.spawnType(KINDS[0].id, sx, sy); },
+  // a synthetic swipe through (sx, sy) along ang — drives the REAL
+  // segment-collision path, so it exercises exactly what a finger does
+  slashAt(sx, sy, ang) {
+    const a = ang || 0, c = Math.cos(a), s = Math.sin(a);
+    checkSlice(sx - c * 60, sy - s * 60, sx + c * 60, sy + s * 60, 8);
+  },
+  get corpses() {
+    return corpses.map(c => ({ x: +c.mesh.position.x.toFixed(3),
+      z: +c.mesh.position.z.toFixed(3), y: +c.mesh.position.y.toFixed(3),
+      t: +c.t.toFixed(3) }));
+  },
   clearEnemies() { while (enemies.length) despawnEnemy(0, false); },
   sliceAll() {
     while (enemies.length) { enemies[0].hp = 1; enemies[0].iv = 0; slashEnemy(0, 0); }
   },
+  get director() {
+    return { st: dir.st, sinceMs: Math.round(performance.now() - dir.t0),
+             clusterLeft: dir.left, lane: +dir.lane.toFixed(2), maxf: MAXF };
+  },
+  forceWave(st) {
+    dir.st = st;
+    dir.t0 = performance.now();
+    dir.next = 0;
+    if (st === 'cluster') { dir.left = 2 + Math.min(2, Math.floor(kills / 15)); dir.lane = 0; }
+    if (st === 'quiet' || st === 'lull') dir.dur = 3000;
+  },
   get fps() { return Math.round(__fps); },
   get degradeStep() { return degradeStep; },
   setDegrade,
+  // acceptance-gate hook: raw readability screenshots are taken with bloom
+  // OFF — visibility must never depend on bloom or lightning
+  setBloom(on) { bloomPass.enabled = !!on; },
+  setBrightness(v) {
+    brightMul = v;
+    if (flashlight) flashlight.intensity = FL_BASE * brightMul;
+  },
   get drawCalls() { return renderer ? renderer.info.render.calls : 0; },
   // TEST ONLY: pretend camera + tracker are live so fed frames can drive the
   // real pipeline without hardware. No landmarker exists — detection idles
